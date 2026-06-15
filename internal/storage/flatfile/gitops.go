@@ -450,4 +450,3 @@ func (s *FlatFileStore) ListFederationPeers(_ context.Context) ([]*storage.Feder
 func (s *FlatFileStore) RemoveFederationPeer(_ context.Context, _ string) error {
 	return errFederationNotSupported
 }
-

@@ -16,16 +16,16 @@ import (
 // FlatFileStore implements the storage.Storage interface using one JSON file
 // per issue. It also satisfies storage.StoreLocator and storage.LifecycleManager.
 type FlatFileStore struct {
-	beadsDir    string // root .beads/ directory
-	issuesDir   string // .beads/issues/
-	commentsDir string // .beads/comments/
-	memoriesDir string // .beads/memories/
-	eventsDir   string // .beads/events/
-	counterPath string // .beads/counter.json
-	configKVPath    string // .beads/config_kv.json
-	localMetaPath   string // .beads/local_metadata.json
-	mergeslotPath   string // .beads/merge_slot.json
-	repoMtimePath   string // .beads/repo_mtime.json
+	beadsDir      string // root .beads/ directory
+	issuesDir     string // .beads/issues/
+	commentsDir   string // .beads/comments/
+	memoriesDir   string // .beads/memories/
+	eventsDir     string // .beads/events/
+	counterPath   string // .beads/counter.json
+	configKVPath  string // .beads/config_kv.json
+	localMetaPath string // .beads/local_metadata.json
+	mergeslotPath string // .beads/merge_slot.json
+	repoMtimePath string // .beads/repo_mtime.json
 
 	mu     sync.RWMutex // protects counter file
 	closed atomic.Bool

@@ -66,7 +66,9 @@ func (s *FlatFileStore) MergeSlotAcquire(_ context.Context, holder, _ string, _ 
 	}
 	if state.Holder == "" {
 		state.Holder = holder
-		s.writeMergeSlot(state)
+		if err := s.writeMergeSlot(state); err != nil {
+			return nil, err
+		}
 		return &storage.MergeSlotResult{SlotID: state.SlotID, Acquired: true, Holder: holder}, nil
 	}
 	if state.Holder == holder {
@@ -98,14 +100,27 @@ func (s *FlatFileStore) readMergeSlot() (*mergeSlotState, error) {
 		return nil, err
 	}
 	var state mergeSlotState
-	json.Unmarshal(data, &state)
+	if err := json.Unmarshal(data, &state); err != nil {
+		return nil, fmt.Errorf("flatfile: parse merge slot: %w", err)
+	}
 	return &state, nil
 }
 
 func (s *FlatFileStore) writeMergeSlot(state *mergeSlotState) error {
-	data, _ := json.MarshalIndent(state, "", "  ")
+	data, err := json.MarshalIndent(state, "", "  ")
+	if err != nil {
+		return fmt.Errorf("flatfile: marshal merge slot: %w", err)
+	}
 	data = append(data, '\n')
-	return os.WriteFile(s.mergeslotPath, data, 0o644)
+	tmp := s.mergeslotPath + ".tmp"
+	if err := os.WriteFile(tmp, data, 0o644); err != nil {
+		return fmt.Errorf("flatfile: write merge slot: %w", err)
+	}
+	if err := os.Rename(tmp, s.mergeslotPath); err != nil {
+		os.Remove(tmp)
+		return fmt.Errorf("flatfile: rename merge slot: %w", err)
+	}
+	return nil
 }
 
 // ── Metadata Slots ────────────────────────────────────────────────────
@@ -120,10 +135,16 @@ func (s *FlatFileStore) SlotSet(_ context.Context, issueID, key, value, _ string
 	}
 	meta := make(map[string]interface{})
 	if len(issue.Metadata) > 0 {
-		json.Unmarshal(issue.Metadata, &meta)
+		if err := json.Unmarshal(issue.Metadata, &meta); err != nil {
+			return fmt.Errorf("flatfile: parse issue metadata: %w", err)
+		}
 	}
 	meta[key] = value
-	issue.Metadata, _ = json.Marshal(meta)
+	raw, err := json.Marshal(meta)
+	if err != nil {
+		return fmt.Errorf("flatfile: marshal issue metadata: %w", err)
+	}
+	issue.Metadata = raw
 	issue.UpdatedAt = time.Now().UTC()
 	return s.writeIssue(issue)
 }
@@ -219,10 +240,14 @@ func (s *FlatFileStore) UpdateIssueID(_ context.Context, oldID, newID string, is
 	if err := s.checkClosed(); err != nil {
 		return err
 	}
-	os.Remove(s.issueFilename(oldID))
 	issue.ID = newID
 	issue.UpdatedAt = time.Now().UTC()
-	return s.writeIssue(issue)
+	if err := s.writeIssue(issue); err != nil {
+		return err
+	}
+	// Remove old file only after new file is safely written.
+	os.Remove(s.issueFilename(oldID))
+	return nil
 }
 
 func (s *FlatFileStore) ClaimIssue(ctx context.Context, id string, actor string) error {
