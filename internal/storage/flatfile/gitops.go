@@ -108,6 +108,9 @@ func (s *FlatFileStore) CommitPending(_ context.Context, _ string) (bool, error)
 }
 
 func (s *FlatFileStore) CommitExists(_ context.Context, commitHash string) (bool, error) {
+	if err := validateGitArg("commit hash", commitHash); err != nil {
+		return false, err
+	}
 	_, err := s.git("cat-file", "-t", commitHash)
 	return err == nil, nil
 }
@@ -250,6 +253,9 @@ func (s *FlatFileStore) History(_ context.Context, issueID string) ([]*storage.H
 }
 
 func (s *FlatFileStore) AsOf(_ context.Context, issueID string, ref string) (*types.Issue, error) {
+	if err := validateGitArg("ref", ref); err != nil {
+		return nil, err
+	}
 	file := fmt.Sprintf(".beads/issues/%s.json", issueID)
 	content, err := s.git("show", ref+":"+file)
 	if err != nil {
@@ -263,6 +269,12 @@ func (s *FlatFileStore) AsOf(_ context.Context, issueID string, ref string) (*ty
 }
 
 func (s *FlatFileStore) Diff(_ context.Context, fromRef, toRef string) ([]*storage.DiffEntry, error) {
+	if err := validateGitArg("from ref", fromRef); err != nil {
+		return nil, err
+	}
+	if err := validateGitArg("to ref", toRef); err != nil {
+		return nil, err
+	}
 	out, err := s.git("diff", "--name-status", fromRef+".."+toRef, "--", ".beads/issues/")
 	if err != nil || out == "" {
 		return nil, nil

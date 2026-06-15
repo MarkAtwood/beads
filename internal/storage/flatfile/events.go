@@ -4,7 +4,9 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"sort"
@@ -19,23 +21,9 @@ func (s *FlatFileStore) eventFilename(issueID string) string {
 	return filepath.Join(s.eventsDir, issueID+".jsonl")
 }
 
-// appendEvent appends an event to the per-issue JSONL events file.
-func (s *FlatFileStore) appendEvent(event *types.Event) error {
-	data, err := json.Marshal(event)
-	if err != nil {
-		return fmt.Errorf("flatfile: marshal event: %w", err)
-	}
-
-	f, err := os.OpenFile(s.eventFilename(event.IssueID), os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
-	if err != nil {
-		return fmt.Errorf("flatfile: open events file: %w", err)
-	}
-	defer f.Close()
-
-	if _, err := f.Write(append(data, '\n')); err != nil {
-		return fmt.Errorf("flatfile: write event: %w", err)
-	}
-	return nil
+// safeEventFilename validates the issue ID before constructing the path.
+func (s *FlatFileStore) safeEventFilename(issueID string) (string, error) {
+	return safePath(s.eventsDir, issueID, ".jsonl")
 }
 
 // GetEvents returns audit events for an issue, newest first, capped at limit.
@@ -114,10 +102,13 @@ func (s *FlatFileStore) CountEvents(_ context.Context, issueID string, limit int
 
 // readEventsFile reads all events from a per-issue JSONL file.
 func (s *FlatFileStore) readEventsFile(issueID string) ([]*types.Event, error) {
-	path := s.eventFilename(issueID)
+	path, err := s.safeEventFilename(issueID)
+	if err != nil {
+		return nil, err
+	}
 	f, err := os.Open(path)
 	if err != nil {
-		if os.IsNotExist(err) {
+		if errors.Is(err, fs.ErrNotExist) {
 			return nil, nil
 		}
 		return nil, fmt.Errorf("flatfile: open events: %w", err)

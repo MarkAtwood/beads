@@ -33,7 +33,10 @@ func (s *FlatFileStore) AddIssueComment(_ context.Context, issueID, author, text
 		CreatedAt: now,
 	}
 
-	dir := filepath.Join(s.commentsDir, issueID)
+	dir, err := safePath(s.commentsDir, issueID, "")
+	if err != nil {
+		return nil, err
+	}
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return nil, fmt.Errorf("flatfile: create comments dir: %w", err)
 	}
@@ -65,7 +68,10 @@ func (s *FlatFileStore) GetIssueComments(_ context.Context, issueID string) ([]*
 		return nil, err
 	}
 
-	dir := filepath.Join(s.commentsDir, issueID)
+	dir, err := safePath(s.commentsDir, issueID, "")
+	if err != nil {
+		return nil, err
+	}
 	entries, err := readDirSafe(dir)
 	if err != nil {
 		return nil, fmt.Errorf("flatfile: read comments dir: %w", err)

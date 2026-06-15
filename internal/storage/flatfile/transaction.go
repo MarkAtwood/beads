@@ -2,10 +2,6 @@ package flatfile
 
 import (
 	"context"
-	"encoding/json"
-	"fmt"
-	"os"
-	"path/filepath"
 	"time"
 
 	"github.com/steveyegge/beads/internal/storage"
@@ -95,22 +91,15 @@ func (tx *flatFileTx) CycleThroughEdges(_ context.Context, edges [][2]string) (s
 		}
 	}
 
-	// Mark which edges are "new" so we only report cycles through them.
-	newEdge := make(map[[2]string]bool, len(edges))
-	for _, e := range edges {
-		newEdge[e] = true
-	}
-
 	// DFS cycle detection: for each new edge's source, walk the graph
 	// looking for a cycle that includes that edge.
 	for _, e := range edges {
-		start := e[0] // issue that depends on e[1]
 		target := e[1]
+		start := e[0] // issue that depends on target
 		// A cycle exists if we can reach start from target via the graph.
 		visited := make(map[string]bool)
 		var path []string
 		if findPath(adj, target, start, visited, &path) {
-			// Render the cycle: target -> ... -> start -> target
 			cycle := target
 			for _, id := range path {
 				cycle += " -> " + id
@@ -118,7 +107,6 @@ func (tx *flatFileTx) CycleThroughEdges(_ context.Context, edges [][2]string) (s
 			cycle += " -> " + target
 			return cycle, nil
 		}
-		_ = newEdge // suppress unused warning
 	}
 	return "", nil
 }
@@ -185,38 +173,8 @@ func (tx *flatFileTx) AddComment(_ context.Context, issueID, actor, comment stri
 	return err
 }
 
-func (tx *flatFileTx) ImportIssueComment(_ context.Context, issueID, author, text string, createdAt time.Time) (*types.Comment, error) {
-	comment := &types.Comment{
-		ID:        fmt.Sprintf("%d", createdAt.UnixNano()),
-		IssueID:   issueID,
-		Author:    author,
-		Text:      text,
-		CreatedAt: createdAt,
-	}
-
-	dir := filepath.Join(tx.s.commentsDir, issueID)
-	if err := os.MkdirAll(dir, 0o755); err != nil {
-		return nil, fmt.Errorf("flatfile: create comments dir: %w", err)
-	}
-
-	filename := createdAt.Format("2006-01-02T15-04-05.000000000Z") + ".json"
-	path := filepath.Join(dir, filename)
-
-	data, err := json.MarshalIndent(comment, "", "  ")
-	if err != nil {
-		return nil, err
-	}
-	data = append(data, '\n')
-
-	tmp := path + ".tmp"
-	if err := os.WriteFile(tmp, data, 0o644); err != nil {
-		return nil, fmt.Errorf("flatfile: write comment: %w", err)
-	}
-	if err := os.Rename(tmp, path); err != nil {
-		_ = os.Remove(tmp)
-		return nil, fmt.Errorf("flatfile: rename comment: %w", err)
-	}
-	return comment, nil
+func (tx *flatFileTx) ImportIssueComment(ctx context.Context, issueID, author, text string, createdAt time.Time) (*types.Comment, error) {
+	return tx.s.ImportIssueComment(ctx, issueID, author, text, createdAt)
 }
 
 func (tx *flatFileTx) GetIssueComments(ctx context.Context, issueID string) ([]*types.Comment, error) {

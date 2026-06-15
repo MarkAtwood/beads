@@ -148,7 +148,10 @@ func (s *FlatFileStore) CountIssuesByGroup(ctx context.Context, filter types.Iss
 
 // countCommentFiles returns the number of comment files for an issue.
 func (s *FlatFileStore) countCommentFiles(issueID string) (int, error) {
-	dir := filepath.Join(s.commentsDir, issueID)
+	dir, err := safePath(s.commentsDir, issueID, "")
+	if err != nil {
+		return 0, err
+	}
 	entries, err := readDirSafe(dir)
 	if err != nil {
 		return 0, err

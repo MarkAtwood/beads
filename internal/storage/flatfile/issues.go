@@ -16,13 +16,25 @@ import (
 )
 
 // issueFilename returns the filesystem path for an issue ID.
+// Callers in hot paths (loadAllIssues) that already validated the ID
+// may use the raw filepath.Join; all other callers go through readIssue/writeIssue
+// which validate via safePath.
 func (s *FlatFileStore) issueFilename(id string) string {
 	return filepath.Join(s.issuesDir, id+".json")
 }
 
+// safeIssueFilename returns the path after validating the ID is safe.
+func (s *FlatFileStore) safeIssueFilename(id string) (string, error) {
+	return safePath(s.issuesDir, id, ".json")
+}
+
 // readIssue reads and unmarshals a single issue file.
 func (s *FlatFileStore) readIssue(id string) (*types.Issue, error) {
-	data, err := os.ReadFile(s.issueFilename(id))
+	path, err := s.safeIssueFilename(id)
+	if err != nil {
+		return nil, err
+	}
+	data, err := os.ReadFile(path)
 	if err != nil {
 		if errors.Is(err, fs.ErrNotExist) {
 			return nil, storage.ErrNotFound
@@ -39,13 +51,16 @@ func (s *FlatFileStore) readIssue(id string) (*types.Issue, error) {
 
 // writeIssue marshals and writes an issue to disk atomically.
 func (s *FlatFileStore) writeIssue(issue *types.Issue) error {
+	path, err := s.safeIssueFilename(issue.ID)
+	if err != nil {
+		return err
+	}
+
 	data, err := json.MarshalIndent(issue, "", "  ")
 	if err != nil {
 		return fmt.Errorf("flatfile: marshal issue %s: %w", issue.ID, err)
 	}
 	data = append(data, '\n')
-
-	path := s.issueFilename(issue.ID)
 	tmp := path + ".tmp"
 	if err := os.WriteFile(tmp, data, 0o644); err != nil {
 		return fmt.Errorf("flatfile: write issue tmp %s: %w", issue.ID, err)
@@ -254,7 +269,10 @@ func (s *FlatFileStore) DeleteIssue(_ context.Context, id string) error {
 		return err
 	}
 
-	path := s.issueFilename(id)
+	path, err := s.safeIssueFilename(id)
+	if err != nil {
+		return err
+	}
 	if err := os.Remove(path); err != nil {
 		if errors.Is(err, fs.ErrNotExist) {
 			return storage.ErrNotFound

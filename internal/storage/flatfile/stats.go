@@ -2,7 +2,6 @@ package flatfile
 
 import (
 	"context"
-	"time"
 
 	"github.com/steveyegge/beads/internal/types"
 )
@@ -94,6 +93,3 @@ func (s *FlatFileStore) GetStatistics(_ context.Context) (*types.Statistics, err
 
 	return stats, nil
 }
-
-// StatusDeferred is referenced from types but may not be exported yet.
-var _ = time.Now // suppress unused import

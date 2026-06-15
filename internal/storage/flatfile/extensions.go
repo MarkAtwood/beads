@@ -32,10 +32,8 @@ func (s *FlatFileStore) MergeSlotCreate(ctx context.Context, actor string) (*typ
 		return nil, err
 	}
 	state := &mergeSlotState{SlotID: "merge-slot"}
-	data, _ := json.MarshalIndent(state, "", "  ")
-	data = append(data, '\n')
-	if err := os.WriteFile(s.mergeslotPath, data, 0o644); err != nil {
-		return nil, fmt.Errorf("flatfile: write merge slot: %w", err)
+	if err := s.writeMergeSlot(state); err != nil {
+		return nil, err
 	}
 	return &types.Issue{ID: "merge-slot", Title: "Merge Slot", IssueType: "slot"}, nil
 }
@@ -799,6 +797,9 @@ func (s *FlatFileStore) ClearRepoMtime(_ context.Context, repoPath string) error
 	if err := s.checkClosed(); err != nil {
 		return err
 	}
+	s.kvMu.Lock()
+	defer s.kvMu.Unlock()
+
 	kv, err := s.readKVFile(s.repoMtimePath)
 	if err != nil {
 		return err
