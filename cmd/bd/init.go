@@ -23,6 +23,7 @@ import (
 	"github.com/steveyegge/beads/internal/git"
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/storage/dolt"
+	"github.com/steveyegge/beads/internal/storage/flatfile"
 	"github.com/steveyegge/beads/internal/storage/schema"
 	"github.com/steveyegge/beads/internal/templates/agents"
 	"github.com/steveyegge/beads/internal/ui"
@@ -212,8 +213,8 @@ Non-interactive mode (--non-interactive or BD_NON_INTERACTIVE=1):
 			fmt.Fprintf(os.Stderr, "  bd init --from-jsonl\n\n")
 			fmt.Fprintf(os.Stderr, "See: https://github.com/gastownhall/beads/blob/main/docs/DOLT.md\n")
 			os.Exit(1)
-		} else if backendFlag != "" && backendFlag != "dolt" {
-			FatalError("unknown backend %q: only \"dolt\" is supported", backendFlag)
+		} else if backendFlag != "" && backendFlag != "dolt" && backendFlag != "flatfile" {
+			FatalError("unknown backend %q: supported backends are \"dolt\" and \"flatfile\"", backendFlag)
 		}
 
 		// Validate --database format early, before any side effects.
@@ -245,8 +246,11 @@ Non-interactive mode (--non-interactive or BD_NON_INTERACTIVE=1):
 			FatalError("--team requires interactive prompts and cannot be used with --non-interactive")
 		}
 
-		// Dolt is the only supported backend
+		// Select backend
 		backend := configfile.BackendDolt
+		if backendFlag == "flatfile" {
+			backend = configfile.BackendFlatfile
+		}
 
 		// Also treat BEADS_DOLT_SERVER_MODE=1 env var as --server.
 		if os.Getenv("BEADS_DOLT_SERVER_MODE") == "1" {
@@ -942,6 +946,12 @@ Non-interactive mode (--non-interactive or BD_NON_INTERACTIVE=1):
 			} else if !quiet {
 				fmt.Printf("  %s Global database %s available\n", ui.RenderPass("✓"), doltserver.GlobalDatabaseName)
 			}
+		}
+
+		// Flat-file backend: create store directly, skip all Dolt setup.
+		if backend == configfile.BackendFlatfile {
+			runInitFlatfile(ctx, beadsDir, prefix, quiet, skipHooks, skipAgents, stealth)
+			return
 		}
 
 		store, err := newDoltStore(ctx, doltCfg)
@@ -2331,4 +2341,98 @@ func initGlobalDatabaseConfig(ctx context.Context, projectCfg *dolt.Config, quie
 	if !quiet {
 		fmt.Printf("  %s Global database schema initialized\n", ui.RenderPass("✓"))
 	}
+}
+
+// runInitFlatfile handles "bd init --backend=flatfile" — creates a flat-file
+// beads workspace without any Dolt server or embedded database.
+func runInitFlatfile(ctx context.Context, beadsDir, prefix string, quiet, skipHooks, skipAgents, stealth bool) {
+	// Create .beads/ directory.
+	if err := os.MkdirAll(beadsDir, 0o700); err != nil {
+		FatalError("failed to create .beads directory: %v", err)
+	}
+
+	// Create the flat-file store (creates issues/, comments/, etc.).
+	ffStore, err := flatfile.NewFlatFileStore(beadsDir)
+	if err != nil {
+		FatalError("failed to create flat-file store: %v", err)
+	}
+
+	// Write metadata.json.
+	projectID := configfile.GenerateProjectID()
+	metaJSON := fmt.Sprintf("{\"backend\":\"flatfile\",\"project_id\":%q}\n", projectID)
+	if err := os.WriteFile(filepath.Join(beadsDir, "metadata.json"), []byte(metaJSON), 0o644); err != nil {
+		FatalError("failed to write metadata.json: %v", err)
+	}
+
+	// Write default config.yaml.
+	cfgPath := filepath.Join(beadsDir, "config.yaml")
+	if _, err := os.Stat(cfgPath); os.IsNotExist(err) {
+		if err := createConfigYaml(beadsDir, false, ""); err != nil {
+			fmt.Fprintf(os.Stderr, "Warning: failed to write config.yaml: %v\n", err)
+		}
+	}
+
+	// Write .gitignore for flat-file: only ignore local_metadata.json and tmp files.
+	gitignorePath := filepath.Join(beadsDir, ".gitignore")
+	flatfileGitignore := "local_metadata.json\n*.tmp\nmerge_slot.json\nrepo_mtime.json\n"
+	if err := os.WriteFile(gitignorePath, []byte(flatfileGitignore), 0o644); err != nil {
+		fmt.Fprintf(os.Stderr, "Warning: failed to write .gitignore: %v\n", err)
+	}
+
+	// Set issue prefix.
+	issuePrefix := strings.ReplaceAll(prefix, ".", "_")
+	if issuePrefix == "" {
+		issuePrefix = strings.ReplaceAll(filepath.Base(mustCwd()), "-", "_")
+		issuePrefix = strings.ReplaceAll(issuePrefix, ".", "_")
+	}
+	if err := ffStore.SetConfig(ctx, "issue_prefix", issuePrefix); err != nil {
+		_ = ffStore.Close()
+		FatalError("failed to set issue prefix: %v", err)
+	}
+
+	// Set as global store for hooks/agents setup.
+	store = ffStore
+	if cmdCtx != nil {
+		cmdCtx.Store = ffStore
+	}
+
+	if !quiet {
+		fmt.Printf("✓ Initialized flat-file beads with prefix %q\n", issuePrefix)
+	}
+
+	// Install hooks (reuse existing logic).
+	if !skipHooks && isGitRepo() {
+		if !hooksInstalled() || hooksNeedUpdate() {
+			if err := installGitHooks(); err != nil && !quiet {
+				fmt.Fprintf(os.Stderr, "Warning: failed to install hooks: %v\n", err)
+			} else if !quiet {
+				fmt.Println("  Hooks installed")
+			}
+		}
+	}
+
+	// Install agent integrations.
+	if !skipAgents && !stealth {
+		if err := setup.InstallClaudeProject(stealth); err != nil && !quiet {
+			fmt.Fprintf(os.Stderr, "Warning: failed to setup Claude hooks: %v\n", err)
+		}
+		if err := setup.InstallCodexProject(); err != nil && !quiet {
+			fmt.Fprintf(os.Stderr, "Warning: failed to setup Codex integration: %v\n", err)
+		}
+	}
+
+	// Commit initial state if in a git repo.
+	if isGitRepo() && !stealth {
+		gitAddCmd := exec.Command("git", "add", ".beads/")
+		gitAddCmd.Dir = filepath.Dir(beadsDir)
+		_ = gitAddCmd.Run()
+	}
+}
+
+func mustCwd() string {
+	cwd, err := os.Getwd()
+	if err != nil {
+		return "project"
+	}
+	return cwd
 }

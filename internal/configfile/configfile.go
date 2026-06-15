@@ -169,7 +169,8 @@ func (c *Config) GetStaleClosedIssuesDays() int {
 
 // Backend constants
 const (
-	BackendDolt = "dolt"
+	BackendDolt     = "dolt"
+	BackendFlatfile = "flatfile"
 )
 
 // BackendCapabilities describes behavioral constraints for a storage backend.
