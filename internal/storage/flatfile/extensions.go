@@ -650,10 +650,19 @@ func (s *FlatFileStore) ImportIssueComment(_ context.Context, issueID, author, t
 	dir := filepath.Join(s.commentsDir, issueID)
 	os.MkdirAll(dir, 0o755)
 	filename := createdAt.Format("2006-01-02T15-04-05.000000000Z") + ".json"
-	data, _ := json.MarshalIndent(comment, "", "  ")
+	data, err := json.MarshalIndent(comment, "", "  ")
+	if err != nil {
+		return nil, fmt.Errorf("flatfile: marshal comment: %w", err)
+	}
 	data = append(data, '\n')
-	if err := os.WriteFile(filepath.Join(dir, filename), data, 0o644); err != nil {
-		return nil, err
+	path := filepath.Join(dir, filename)
+	tmp := path + ".tmp"
+	if err := os.WriteFile(tmp, data, 0o644); err != nil {
+		return nil, fmt.Errorf("flatfile: write comment: %w", err)
+	}
+	if err := os.Rename(tmp, path); err != nil {
+		os.Remove(tmp)
+		return nil, fmt.Errorf("flatfile: rename comment: %w", err)
 	}
 	return comment, nil
 }
@@ -720,6 +729,9 @@ func (s *FlatFileStore) DeleteConfig(_ context.Context, key string) error {
 	if err := s.checkClosed(); err != nil {
 		return err
 	}
+	s.kvMu.Lock()
+	defer s.kvMu.Unlock()
+
 	kv, err := s.readKVFile(s.configKVPath)
 	if err != nil {
 		return err

@@ -90,6 +90,9 @@ func (s *FlatFileStore) writeKVFile(path string, kv map[string]string) error {
 }
 
 func (s *FlatFileStore) setKV(path, key, value string) error {
+	s.kvMu.Lock()
+	defer s.kvMu.Unlock()
+
 	kv, err := s.readKVFile(path)
 	if err != nil {
 		return err

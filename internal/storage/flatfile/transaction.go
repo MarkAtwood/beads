@@ -76,10 +76,72 @@ func (tx *flatFileTx) GetDependencyRecords(_ context.Context, issueID string) ([
 	return issue.Dependencies, nil
 }
 
-func (tx *flatFileTx) CycleThroughEdges(_ context.Context, _ [][2]string) (string, error) {
-	// Cycle detection via full graph scan — simplified for flat-file.
-	// Return empty string (no cycle) by default; full implementation in DependencyQueryStore.
+func (tx *flatFileTx) CycleThroughEdges(_ context.Context, edges [][2]string) (string, error) {
+	if len(edges) == 0 {
+		return "", nil
+	}
+
+	// Build the full dependency graph from all issues on disk.
+	all, err := tx.s.loadAllIssues()
+	if err != nil {
+		return "", err
+	}
+	adj := make(map[string][]string)
+	for _, issue := range all {
+		for _, dep := range issue.Dependencies {
+			if dep.Type != "parent-child" {
+				adj[issue.ID] = append(adj[issue.ID], dep.DependsOnID)
+			}
+		}
+	}
+
+	// Mark which edges are "new" so we only report cycles through them.
+	newEdge := make(map[[2]string]bool, len(edges))
+	for _, e := range edges {
+		newEdge[e] = true
+	}
+
+	// DFS cycle detection: for each new edge's source, walk the graph
+	// looking for a cycle that includes that edge.
+	for _, e := range edges {
+		start := e[0] // issue that depends on e[1]
+		target := e[1]
+		// A cycle exists if we can reach start from target via the graph.
+		visited := make(map[string]bool)
+		var path []string
+		if findPath(adj, target, start, visited, &path) {
+			// Render the cycle: target -> ... -> start -> target
+			cycle := target
+			for _, id := range path {
+				cycle += " -> " + id
+			}
+			cycle += " -> " + target
+			return cycle, nil
+		}
+		_ = newEdge // suppress unused warning
+	}
 	return "", nil
+}
+
+// findPath does DFS from 'from' looking for 'to'. Returns true if reachable,
+// with path containing the intermediate nodes.
+func findPath(adj map[string][]string, from, to string, visited map[string]bool, path *[]string) bool {
+	if from == to {
+		*path = append(*path, to)
+		return true
+	}
+	if visited[from] {
+		return false
+	}
+	visited[from] = true
+	*path = append(*path, from)
+	for _, next := range adj[from] {
+		if findPath(adj, next, to, visited, path) {
+			return true
+		}
+	}
+	*path = (*path)[:len(*path)-1]
+	return false
 }
 
 func (tx *flatFileTx) AddLabel(ctx context.Context, issueID, label, actor string) error {
@@ -146,8 +208,13 @@ func (tx *flatFileTx) ImportIssueComment(_ context.Context, issueID, author, tex
 	}
 	data = append(data, '\n')
 
-	if err := os.WriteFile(path, data, 0o644); err != nil {
-		return nil, err
+	tmp := path + ".tmp"
+	if err := os.WriteFile(tmp, data, 0o644); err != nil {
+		return nil, fmt.Errorf("flatfile: write comment: %w", err)
+	}
+	if err := os.Rename(tmp, path); err != nil {
+		os.Remove(tmp)
+		return nil, fmt.Errorf("flatfile: rename comment: %w", err)
 	}
 	return comment, nil
 }

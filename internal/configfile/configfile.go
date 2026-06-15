@@ -17,7 +17,7 @@ const ConfigFileName = "metadata.json"
 
 type Config struct {
 	Database string `json:"database"`
-	Backend  string `json:"backend,omitempty"` // Deprecated: always "dolt". Kept for JSON compat.
+	Backend  string `json:"backend,omitempty"` // Storage backend: "dolt" (default) or "flatfile"
 
 	// Deletions configuration
 	DeletionsRetentionDays int `json:"deletions_retention_days,omitempty"` // 0 means use default (3 days)
@@ -188,9 +188,13 @@ type BackendCapabilities struct {
 }
 
 // CapabilitiesForBackend returns capabilities for a backend string.
-// Dolt is the only supported backend. Returns SingleProcessOnly=true by default;
-// use Config.GetCapabilities() to properly handle server mode.
-func CapabilitiesForBackend(_ string) BackendCapabilities {
+// Returns SingleProcessOnly=true for embedded dolt, false for flatfile
+// (which uses filesystem for concurrency). Use Config.GetCapabilities()
+// to properly handle server mode.
+func CapabilitiesForBackend(backend string) BackendCapabilities {
+	if backend == BackendFlatfile {
+		return BackendCapabilities{SingleProcessOnly: false}
+	}
 	return BackendCapabilities{SingleProcessOnly: true}
 }
 
@@ -205,8 +209,12 @@ func (c *Config) GetCapabilities() BackendCapabilities {
 	return CapabilitiesForBackend(backend)
 }
 
-// GetBackend returns the backend type. Always returns "dolt".
+// GetBackend returns the storage backend type from metadata.json.
+// Returns "dolt" if the field is empty (backward compat).
 func (c *Config) GetBackend() string {
+	if c.Backend != "" {
+		return c.Backend
+	}
 	return BackendDolt
 }
 

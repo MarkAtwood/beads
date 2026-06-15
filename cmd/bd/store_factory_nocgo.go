@@ -52,6 +52,9 @@ func acquireEmbeddedLock(_ string, _ bool) (util.Unlocker, error) {
 
 // newDoltStoreFromConfig creates a SQL-server-backed storage backend from config.
 func newDoltStoreFromConfig(ctx context.Context, beadsDir string) (storage.DoltStorage, error) {
+	if flatfile.IsFlatFileBackend(beadsDir) {
+		return flatfile.OpenStore(ctx, beadsDir)
+	}
 	cfg, err := configfile.Load(beadsDir)
 	if err == nil && cfg != nil && cfg.IsDoltProxiedServerMode() {
 		// Proxied-server workspaces have no classic store backend; they are
@@ -67,6 +70,9 @@ func newDoltStoreFromConfig(ctx context.Context, beadsDir string) (storage.DoltS
 
 // newReadOnlyStoreFromConfig creates a read-only SQL-server-backed storage backend.
 func newReadOnlyStoreFromConfig(ctx context.Context, beadsDir string) (storage.DoltStorage, error) {
+	if flatfile.IsFlatFileBackend(beadsDir) {
+		return flatfile.OpenStore(ctx, beadsDir)
+	}
 	cfg, err := configfile.Load(beadsDir)
 	if err == nil && cfg != nil && cfg.IsDoltProxiedServerMode() {
 		// Proxied-server workspaces have no classic store backend (see

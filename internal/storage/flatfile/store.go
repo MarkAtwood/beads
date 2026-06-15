@@ -27,7 +27,9 @@ type FlatFileStore struct {
 	mergeslotPath string // .beads/merge_slot.json
 	repoMtimePath string // .beads/repo_mtime.json
 
-	mu     sync.RWMutex // protects counter file
+	mu   sync.RWMutex // protects counter file
+	kvMu sync.Mutex   // protects config/metadata KV read-modify-write
+
 	closed atomic.Bool
 }
 

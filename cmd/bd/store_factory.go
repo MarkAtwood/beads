@@ -96,6 +96,10 @@ func acquireEmbeddedLock(beadsDir string, serverMode bool) (util.Unlocker, error
 // For embedded mode, legacy hyphenated database names (pre-GH#2142) are
 // auto-sanitized to underscores and the fix is persisted to metadata.json.
 func newDoltStoreFromConfig(ctx context.Context, beadsDir string) (storage.DoltStorage, error) {
+	// Flat-file backend: no Dolt config needed.
+	if flatfile.IsFlatFileBackend(beadsDir) {
+		return flatfile.OpenStore(ctx, beadsDir)
+	}
 	cfg, err := configfile.Load(beadsDir)
 	if err == nil && cfg != nil && cfg.IsDoltProxiedServerMode() {
 		// Proxied-server workspaces have no classic store backend; they are
@@ -167,6 +171,10 @@ func migrateHyphenatedDB(beadsDir string, cfg *configfile.Config, oldName, newNa
 // only — no directory renames or metadata.json writes. This prevents cross-repo
 // hydration from mutating foreign projects (GH#3231).
 func newReadOnlyStoreFromConfig(ctx context.Context, beadsDir string) (storage.DoltStorage, error) {
+	// Flat-file backend: no distinction between read-only and read-write.
+	if flatfile.IsFlatFileBackend(beadsDir) {
+		return flatfile.OpenStore(ctx, beadsDir)
+	}
 	cfg, err := configfile.Load(beadsDir)
 	if err == nil && cfg != nil && cfg.IsDoltProxiedServerMode() {
 		// Proxied-server workspaces have no classic store backend (see

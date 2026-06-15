@@ -35,14 +35,28 @@ func (s *FlatFileStore) git(args ...string) (string, error) {
 	return strings.TrimSpace(string(out)), nil
 }
 
+// validateGitArg rejects strings starting with "-" to prevent git flag injection.
+func validateGitArg(name, value string) error {
+	if strings.HasPrefix(value, "-") {
+		return fmt.Errorf("flatfile: invalid %s %q: must not start with '-'", name, value)
+	}
+	return nil
+}
+
 // ── VersionControl ───────────────────────────────────────────────────
 
 func (s *FlatFileStore) Branch(_ context.Context, name string) error {
+	if err := validateGitArg("branch name", name); err != nil {
+		return err
+	}
 	_, err := s.git("branch", name)
 	return err
 }
 
 func (s *FlatFileStore) Checkout(_ context.Context, branch string) error {
+	if err := validateGitArg("branch name", branch); err != nil {
+		return err
+	}
 	_, err := s.git("checkout", branch)
 	return err
 }
@@ -52,6 +66,9 @@ func (s *FlatFileStore) CurrentBranch(_ context.Context) (string, error) {
 }
 
 func (s *FlatFileStore) DeleteBranch(_ context.Context, branch string) error {
+	if err := validateGitArg("branch name", branch); err != nil {
+		return err
+	}
 	_, err := s.git("branch", "-d", branch)
 	return err
 }
@@ -159,6 +176,9 @@ func (s *FlatFileStore) Log(_ context.Context, limit int) ([]storage.CommitInfo,
 }
 
 func (s *FlatFileStore) Merge(_ context.Context, branch string) ([]storage.Conflict, error) {
+	if err := validateGitArg("branch", branch); err != nil {
+		return nil, err
+	}
 	_, err := s.git("merge", branch)
 	if err != nil {
 		// Check for conflicts
@@ -284,11 +304,17 @@ func (s *FlatFileStore) Diff(_ context.Context, fromRef, toRef string) ([]*stora
 // ── RemoteStore ──────────────────────────────────────────────────────
 
 func (s *FlatFileStore) AddRemote(_ context.Context, name, url string) error {
+	if err := validateGitArg("remote name", name); err != nil {
+		return err
+	}
 	_, err := s.git("remote", "add", name, url)
 	return err
 }
 
 func (s *FlatFileStore) RemoveRemote(_ context.Context, name string) error {
+	if err := validateGitArg("remote name", name); err != nil {
+		return err
+	}
 	_, err := s.git("remote", "remove", name)
 	return err
 }
@@ -346,6 +372,9 @@ func (s *FlatFileStore) ForcePush(_ context.Context) error {
 }
 
 func (s *FlatFileStore) PushRemote(_ context.Context, remote string, force bool) error {
+	if err := validateGitArg("remote", remote); err != nil {
+		return err
+	}
 	args := []string{"push", remote}
 	if force {
 		args = append(args, "--force")
@@ -355,22 +384,34 @@ func (s *FlatFileStore) PushRemote(_ context.Context, remote string, force bool)
 }
 
 func (s *FlatFileStore) PullRemote(_ context.Context, remote string) error {
+	if err := validateGitArg("remote", remote); err != nil {
+		return err
+	}
 	_, err := s.git("pull", remote)
 	return err
 }
 
 func (s *FlatFileStore) Fetch(_ context.Context, peer string) error {
+	if err := validateGitArg("peer", peer); err != nil {
+		return err
+	}
 	_, err := s.git("fetch", peer)
 	return err
 }
 
 func (s *FlatFileStore) PushTo(_ context.Context, peer string) error {
+	if err := validateGitArg("peer", peer); err != nil {
+		return err
+	}
 	s.git("add", ".beads/")
 	_, err := s.git("push", peer)
 	return err
 }
 
 func (s *FlatFileStore) PullFrom(_ context.Context, peer string) ([]storage.Conflict, error) {
+	if err := validateGitArg("peer", peer); err != nil {
+		return nil, err
+	}
 	_, err := s.git("pull", peer)
 	if err != nil {
 		conflicts, _ := s.GetConflicts(context.Background())
@@ -382,6 +423,9 @@ func (s *FlatFileStore) PullFrom(_ context.Context, peer string) ([]storage.Conf
 // ── SyncStore ────────────────────────────────────────────────────────
 
 func (s *FlatFileStore) Sync(_ context.Context, peer string, _ string) (*storage.SyncResult, error) {
+	if err := validateGitArg("peer", peer); err != nil {
+		return nil, err
+	}
 	start := time.Now()
 	result := &storage.SyncResult{Peer: peer, StartTime: start}
 
@@ -414,6 +458,9 @@ func (s *FlatFileStore) Sync(_ context.Context, peer string, _ string) (*storage
 }
 
 func (s *FlatFileStore) SyncStatus(_ context.Context, peer string) (*storage.SyncStatus, error) {
+	if err := validateGitArg("peer", peer); err != nil {
+		return nil, err
+	}
 	out, err := s.git("rev-list", "--left-right", "--count", "HEAD..."+peer+"/main")
 	if err != nil {
 		return &storage.SyncStatus{Peer: peer}, nil
