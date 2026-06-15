@@ -15,6 +15,7 @@ import (
 	"github.com/steveyegge/beads/internal/storage/dbproxy/util"
 	"github.com/steveyegge/beads/internal/storage/dolt"
 	"github.com/steveyegge/beads/internal/storage/embeddeddolt"
+	"github.com/steveyegge/beads/internal/storage/flatfile"
 )
 
 func usesSQLServer() bool {
@@ -46,6 +47,10 @@ func usesProxiedServer() bool {
 // newDoltStore creates a storage backend from an explicit config.
 // Used by bd init and PersistentPreRun.
 func newDoltStore(ctx context.Context, cfg *dolt.Config) (storage.DoltStorage, error) {
+	// Flat-file backend: no Dolt server needed.
+	if cfg.BeadsDir != "" && flatfile.IsFlatFileBackend(cfg.BeadsDir) {
+		return flatfile.OpenStore(ctx, cfg.BeadsDir)
+	}
 	if cfg.ProxiedServer {
 		// TODO: this should not be a store
 		// it should be a uow provider
