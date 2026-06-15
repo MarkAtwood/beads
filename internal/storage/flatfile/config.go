@@ -83,7 +83,7 @@ func (s *FlatFileStore) writeKVFile(path string, kv map[string]string) error {
 		return fmt.Errorf("flatfile: write kv tmp: %w", err)
 	}
 	if err := os.Rename(tmp, path); err != nil {
-		os.Remove(tmp)
+		_ = os.Remove(tmp)
 		return fmt.Errorf("flatfile: rename kv: %w", err)
 	}
 	return nil

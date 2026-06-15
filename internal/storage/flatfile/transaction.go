@@ -213,7 +213,7 @@ func (tx *flatFileTx) ImportIssueComment(_ context.Context, issueID, author, tex
 		return nil, fmt.Errorf("flatfile: write comment: %w", err)
 	}
 	if err := os.Rename(tmp, path); err != nil {
-		os.Remove(tmp)
+		_ = os.Remove(tmp)
 		return nil, fmt.Errorf("flatfile: rename comment: %w", err)
 	}
 	return comment, nil

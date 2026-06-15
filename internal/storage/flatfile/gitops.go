@@ -85,7 +85,7 @@ func (s *FlatFileStore) ListBranches(_ context.Context) ([]string, error) {
 }
 
 func (s *FlatFileStore) Commit(_ context.Context, message string) error {
-	s.git("add", ".beads/")
+	_, _ = s.git("add", ".beads/")
 	_, err := s.git("commit", "-m", message, "--", ".beads/")
 	return err
 }
@@ -102,7 +102,7 @@ func (s *FlatFileStore) CommitPending(_ context.Context, _ string) (bool, error)
 	if out == "" {
 		return false, nil
 	}
-	s.git("add", ".beads/")
+	_, _ = s.git("add", ".beads/")
 	_, err = s.git("commit", "-m", "bd: auto-commit pending changes")
 	return err == nil, err
 }
@@ -355,7 +355,7 @@ func (s *FlatFileStore) ListRemotes(_ context.Context) ([]storage.RemoteInfo, er
 }
 
 func (s *FlatFileStore) Push(_ context.Context) error {
-	s.git("add", ".beads/")
+	_, _ = s.git("add", ".beads/")
 	_, err := s.git("push")
 	return err
 }
@@ -366,7 +366,7 @@ func (s *FlatFileStore) Pull(_ context.Context) error {
 }
 
 func (s *FlatFileStore) ForcePush(_ context.Context) error {
-	s.git("add", ".beads/")
+	_, _ = s.git("add", ".beads/")
 	_, err := s.git("push", "--force")
 	return err
 }
@@ -403,7 +403,7 @@ func (s *FlatFileStore) PushTo(_ context.Context, peer string) error {
 	if err := validateGitArg("peer", peer); err != nil {
 		return err
 	}
-	s.git("add", ".beads/")
+	_, _ = s.git("add", ".beads/")
 	_, err := s.git("push", peer)
 	return err
 }
@@ -445,7 +445,7 @@ func (s *FlatFileStore) Sync(_ context.Context, peer string, _ string) (*storage
 		result.Merged = true
 	}
 
-	s.git("add", ".beads/")
+	_, _ = s.git("add", ".beads/")
 	_, pushErr := s.git("push", peer)
 	if pushErr != nil {
 		result.PushError = pushErr

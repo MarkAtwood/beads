@@ -117,7 +117,7 @@ func (s *FlatFileStore) writeMergeSlot(state *mergeSlotState) error {
 		return fmt.Errorf("flatfile: write merge slot: %w", err)
 	}
 	if err := os.Rename(tmp, s.mergeslotPath); err != nil {
-		os.Remove(tmp)
+		_ = os.Remove(tmp)
 		return fmt.Errorf("flatfile: rename merge slot: %w", err)
 	}
 	return nil
@@ -229,7 +229,7 @@ func (s *FlatFileStore) DeleteIssuesBySourceRepo(_ context.Context, sourceRepo s
 	deleted := 0
 	for _, issue := range all {
 		if issue.SourceRepo == sourceRepo {
-			os.Remove(s.issueFilename(issue.ID))
+			_ = os.Remove(s.issueFilename(issue.ID))
 			deleted++
 		}
 	}
@@ -246,7 +246,7 @@ func (s *FlatFileStore) UpdateIssueID(_ context.Context, oldID, newID string, is
 		return err
 	}
 	// Remove old file only after new file is safely written.
-	os.Remove(s.issueFilename(oldID))
+	_ = os.Remove(s.issueFilename(oldID))
 	return nil
 }
 
@@ -648,7 +648,7 @@ func (s *FlatFileStore) ImportIssueComment(_ context.Context, issueID, author, t
 		CreatedAt: createdAt,
 	}
 	dir := filepath.Join(s.commentsDir, issueID)
-	os.MkdirAll(dir, 0o755)
+	_ = os.MkdirAll(dir, 0o755)
 	filename := createdAt.Format("2006-01-02T15-04-05.000000000Z") + ".json"
 	data, err := json.MarshalIndent(comment, "", "  ")
 	if err != nil {
@@ -661,7 +661,7 @@ func (s *FlatFileStore) ImportIssueComment(_ context.Context, issueID, author, t
 		return nil, fmt.Errorf("flatfile: write comment: %w", err)
 	}
 	if err := os.Rename(tmp, path); err != nil {
-		os.Remove(tmp)
+		_ = os.Remove(tmp)
 		return nil, fmt.Errorf("flatfile: rename comment: %w", err)
 	}
 	return comment, nil
@@ -784,7 +784,7 @@ func (s *FlatFileStore) GetRepoMtime(_ context.Context, repoPath string) (int64,
 		return 0, nil
 	}
 	var n int64
-	fmt.Sscanf(v, "%d", &n)
+	_, _ = fmt.Sscanf(v, "%d", &n)
 	return n, nil
 }
 

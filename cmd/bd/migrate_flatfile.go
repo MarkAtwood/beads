@@ -107,7 +107,10 @@ The flat-file backend uses git for sync instead of Dolt remotes.`,
 				continue
 			}
 			for _, c := range comments {
-				ffStore.ImportIssueComment(ctx, c.IssueID, c.Author, c.Text, c.CreatedAt)
+				if _, err := ffStore.ImportIssueComment(ctx, c.IssueID, c.Author, c.Text, c.CreatedAt); err != nil {
+					fmt.Fprintf(os.Stderr, "Warning: failed to migrate comment on %s: %v\n", c.IssueID, err)
+					continue
+				}
 				commentCount++
 			}
 		}
@@ -119,7 +122,9 @@ The flat-file backend uses git for sync instead of Dolt remotes.`,
 		allConfig, err := s.GetAllConfig(ctx)
 		if err == nil {
 			for k, v := range allConfig {
-				ffStore.SetConfig(ctx, k, v)
+				if err := ffStore.SetConfig(ctx, k, v); err != nil {
+					fmt.Fprintf(os.Stderr, "Warning: failed to migrate config %s: %v\n", k, err)
+				}
 			}
 			fmt.Printf("Migrated %d config entries.\n", len(allConfig))
 		}
@@ -150,7 +155,7 @@ The flat-file backend uses git for sync instead of Dolt remotes.`,
 			fmt.Fprintf(os.Stderr, "Warning: failed to update .gitignore: %v\n", err)
 		}
 
-		ffStore.Close()
+		_ = ffStore.Close()
 
 		fmt.Println("\nMigration complete. The flat-file backend is now active.")
 		fmt.Println("You can remove the Dolt data directory to reclaim space:")

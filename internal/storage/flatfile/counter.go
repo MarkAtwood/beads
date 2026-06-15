@@ -83,7 +83,7 @@ func (s *FlatFileStore) writeCounter(state *counterState) error {
 		return fmt.Errorf("flatfile: write counter tmp: %w", err)
 	}
 	if err := os.Rename(tmp, s.counterPath); err != nil {
-		os.Remove(tmp)
+		_ = os.Remove(tmp)
 		return fmt.Errorf("flatfile: rename counter: %w", err)
 	}
 	return nil

@@ -51,7 +51,7 @@ func (s *FlatFileStore) writeIssue(issue *types.Issue) error {
 		return fmt.Errorf("flatfile: write issue tmp %s: %w", issue.ID, err)
 	}
 	if err := os.Rename(tmp, path); err != nil {
-		os.Remove(tmp)
+		_ = os.Remove(tmp)
 		return fmt.Errorf("flatfile: rename issue %s: %w", issue.ID, err)
 	}
 	return nil

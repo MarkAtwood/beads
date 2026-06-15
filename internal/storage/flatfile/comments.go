@@ -52,7 +52,7 @@ func (s *FlatFileStore) AddIssueComment(_ context.Context, issueID, author, text
 		return nil, fmt.Errorf("flatfile: write comment tmp: %w", err)
 	}
 	if err := os.Rename(tmp, path); err != nil {
-		os.Remove(tmp)
+		_ = os.Remove(tmp)
 		return nil, fmt.Errorf("flatfile: rename comment: %w", err)
 	}
 
