@@ -397,8 +397,10 @@ func (s *FlatFileStore) GetDependencyCounts(_ context.Context, issueIDs []string
 	if err != nil {
 		return nil, err
 	}
+	issueMap := make(map[string]*types.Issue, len(all))
 	depCounts := make(map[string]int)
 	for _, issue := range all {
+		issueMap[issue.ID] = issue
 		for _, dep := range issue.Dependencies {
 			if dep.Type != types.DepParentChild {
 				depCounts[dep.DependsOnID]++
@@ -407,8 +409,8 @@ func (s *FlatFileStore) GetDependencyCounts(_ context.Context, issueIDs []string
 	}
 	result := make(map[string]*types.DependencyCounts, len(issueIDs))
 	for _, id := range issueIDs {
-		issue, err := s.readIssue(id)
-		if err != nil {
+		issue, ok := issueMap[id]
+		if !ok {
 			continue
 		}
 		dc := 0
