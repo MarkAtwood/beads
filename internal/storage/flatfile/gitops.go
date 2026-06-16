@@ -5,6 +5,7 @@ package flatfile
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os/exec"
 	"path/filepath"
@@ -22,12 +23,13 @@ func (s *FlatFileStore) gitDir() string {
 }
 
 // git runs a git command in the repo root and returns stdout.
-func (s *FlatFileStore) git(args ...string) (string, error) {
-	cmd := exec.Command("git", args...)
+func (s *FlatFileStore) git(ctx context.Context, args ...string) (string, error) {
+	cmd := exec.CommandContext(ctx, "git", args...)
 	cmd.Dir = s.gitDir()
 	out, err := cmd.Output()
 	if err != nil {
-		if ee, ok := err.(*exec.ExitError); ok {
+		var ee *exec.ExitError
+		if errors.As(err, &ee) {
 			return "", fmt.Errorf("git %s: %s", strings.Join(args, " "), string(ee.Stderr))
 		}
 		return "", fmt.Errorf("git %s: %w", strings.Join(args, " "), err)
@@ -45,36 +47,36 @@ func validateGitArg(name, value string) error {
 
 // ── VersionControl ───────────────────────────────────────────────────
 
-func (s *FlatFileStore) Branch(_ context.Context, name string) error {
+func (s *FlatFileStore) Branch(ctx context.Context, name string) error {
 	if err := validateGitArg("branch name", name); err != nil {
 		return err
 	}
-	_, err := s.git("branch", name)
+	_, err := s.git(ctx, "branch", name)
 	return err
 }
 
-func (s *FlatFileStore) Checkout(_ context.Context, branch string) error {
+func (s *FlatFileStore) Checkout(ctx context.Context, branch string) error {
 	if err := validateGitArg("branch name", branch); err != nil {
 		return err
 	}
-	_, err := s.git("checkout", branch)
+	_, err := s.git(ctx, "checkout", branch)
 	return err
 }
 
-func (s *FlatFileStore) CurrentBranch(_ context.Context) (string, error) {
-	return s.git("rev-parse", "--abbrev-ref", "HEAD")
+func (s *FlatFileStore) CurrentBranch(ctx context.Context) (string, error) {
+	return s.git(ctx, "rev-parse", "--abbrev-ref", "HEAD")
 }
 
-func (s *FlatFileStore) DeleteBranch(_ context.Context, branch string) error {
+func (s *FlatFileStore) DeleteBranch(ctx context.Context, branch string) error {
 	if err := validateGitArg("branch name", branch); err != nil {
 		return err
 	}
-	_, err := s.git("branch", "-d", branch)
+	_, err := s.git(ctx, "branch", "-d", branch)
 	return err
 }
 
-func (s *FlatFileStore) ListBranches(_ context.Context) ([]string, error) {
-	out, err := s.git("branch", "--list", "--format=%(refname:short)")
+func (s *FlatFileStore) ListBranches(ctx context.Context) ([]string, error) {
+	out, err := s.git(ctx, "branch", "--list", "--format=%(refname:short)")
 	if err != nil {
 		return nil, err
 	}
@@ -84,9 +86,9 @@ func (s *FlatFileStore) ListBranches(_ context.Context) ([]string, error) {
 	return strings.Split(out, "\n"), nil
 }
 
-func (s *FlatFileStore) Commit(_ context.Context, message string) error {
-	_, _ = s.git("add", ".beads/")
-	_, err := s.git("commit", "-m", message, "--", ".beads/")
+func (s *FlatFileStore) Commit(ctx context.Context, message string) error {
+	_, _ = s.git(ctx, "add", ".beads/")
+	_, err := s.git(ctx, "commit", "-m", message, "--", ".beads/")
 	return err
 }
 
@@ -94,33 +96,33 @@ func (s *FlatFileStore) CommitWithConfig(ctx context.Context, message string) er
 	return s.Commit(ctx, message)
 }
 
-func (s *FlatFileStore) CommitPending(_ context.Context, _ string) (bool, error) {
-	out, err := s.git("status", "--porcelain", ".beads/")
+func (s *FlatFileStore) CommitPending(ctx context.Context, _ string) (bool, error) {
+	out, err := s.git(ctx, "status", "--porcelain", ".beads/")
 	if err != nil {
 		return false, err
 	}
 	if out == "" {
 		return false, nil
 	}
-	_, _ = s.git("add", ".beads/")
-	_, err = s.git("commit", "-m", "bd: auto-commit pending changes")
+	_, _ = s.git(ctx, "add", ".beads/")
+	_, err = s.git(ctx, "commit", "-m", "bd: auto-commit pending changes")
 	return err == nil, err
 }
 
-func (s *FlatFileStore) CommitExists(_ context.Context, commitHash string) (bool, error) {
+func (s *FlatFileStore) CommitExists(ctx context.Context, commitHash string) (bool, error) {
 	if err := validateGitArg("commit hash", commitHash); err != nil {
 		return false, err
 	}
-	_, err := s.git("cat-file", "-t", commitHash)
+	_, err := s.git(ctx, "cat-file", "-t", commitHash)
 	return err == nil, nil
 }
 
-func (s *FlatFileStore) GetCurrentCommit(_ context.Context) (string, error) {
-	return s.git("rev-parse", "HEAD")
+func (s *FlatFileStore) GetCurrentCommit(ctx context.Context) (string, error) {
+	return s.git(ctx, "rev-parse", "HEAD")
 }
 
-func (s *FlatFileStore) Status(_ context.Context) (*storage.Status, error) {
-	out, err := s.git("status", "--porcelain", ".beads/")
+func (s *FlatFileStore) Status(ctx context.Context) (*storage.Status, error) {
+	out, err := s.git(ctx, "status", "--porcelain", ".beads/")
 	if err != nil {
 		return &storage.Status{}, nil
 	}
@@ -150,9 +152,9 @@ func (s *FlatFileStore) Status(_ context.Context) (*storage.Status, error) {
 	return &storage.Status{Staged: staged, Unstaged: unstaged}, nil
 }
 
-func (s *FlatFileStore) Log(_ context.Context, limit int) ([]storage.CommitInfo, error) {
+func (s *FlatFileStore) Log(ctx context.Context, limit int) ([]storage.CommitInfo, error) {
 	args := []string{"log", fmt.Sprintf("-%d", limit), "--format=%H|%an|%ae|%aI|%s", "--", ".beads/"}
-	out, err := s.git(args...)
+	out, err := s.git(ctx, args...)
 	if err != nil {
 		return nil, nil // no commits yet
 	}
@@ -178,21 +180,20 @@ func (s *FlatFileStore) Log(_ context.Context, limit int) ([]storage.CommitInfo,
 	return commits, nil
 }
 
-func (s *FlatFileStore) Merge(_ context.Context, branch string) ([]storage.Conflict, error) {
+func (s *FlatFileStore) Merge(ctx context.Context, branch string) ([]storage.Conflict, error) {
 	if err := validateGitArg("branch", branch); err != nil {
 		return nil, err
 	}
-	_, err := s.git("merge", branch)
+	_, err := s.git(ctx, "merge", branch)
 	if err != nil {
-		// Check for conflicts
-		conflicts, _ := s.GetConflicts(context.Background())
+		conflicts, _ := s.GetConflicts(ctx)
 		return conflicts, err
 	}
 	return nil, nil
 }
 
-func (s *FlatFileStore) GetConflicts(_ context.Context) ([]storage.Conflict, error) {
-	out, _ := s.git("diff", "--name-only", "--diff-filter=U")
+func (s *FlatFileStore) GetConflicts(ctx context.Context) ([]storage.Conflict, error) {
+	out, _ := s.git(ctx, "diff", "--name-only", "--diff-filter=U")
 	if out == "" {
 		return nil, nil
 	}
@@ -206,13 +207,13 @@ func (s *FlatFileStore) GetConflicts(_ context.Context) ([]storage.Conflict, err
 	return conflicts, nil
 }
 
-func (s *FlatFileStore) ResolveConflicts(_ context.Context, _ string, strategy string) error {
+func (s *FlatFileStore) ResolveConflicts(ctx context.Context, _ string, strategy string) error {
 	switch strategy {
 	case "ours":
-		_, err := s.git("checkout", "--ours", ".beads/")
+		_, err := s.git(ctx, "checkout", "--ours", ".beads/")
 		return err
 	case "theirs":
-		_, err := s.git("checkout", "--theirs", ".beads/")
+		_, err := s.git(ctx, "checkout", "--theirs", ".beads/")
 		return err
 	default:
 		return fmt.Errorf("flatfile: unknown conflict strategy: %s", strategy)
@@ -221,12 +222,12 @@ func (s *FlatFileStore) ResolveConflicts(_ context.Context, _ string, strategy s
 
 // ── HistoryViewer ────────────────────────────────────────────────────
 
-func (s *FlatFileStore) History(_ context.Context, issueID string) ([]*storage.HistoryEntry, error) {
+func (s *FlatFileStore) History(ctx context.Context, issueID string) ([]*storage.HistoryEntry, error) {
 	if err := validateID(issueID); err != nil {
 		return nil, err
 	}
 	file := fmt.Sprintf(".beads/issues/%s.json", issueID)
-	out, err := s.git("log", "--format=%H|%an|%aI", "--", file)
+	out, err := s.git(ctx, "log", "--format=%H|%an|%aI", "--", file)
 	if err != nil || out == "" {
 		return nil, nil
 	}
@@ -244,7 +245,7 @@ func (s *FlatFileStore) History(_ context.Context, issueID string) ([]*storage.H
 			CommitDate: date,
 		}
 		// Try to load the issue at this commit.
-		if content, err := s.git("show", parts[0]+":"+file); err == nil {
+		if content, err := s.git(ctx, "show", parts[0]+":"+file); err == nil {
 			var issue types.Issue
 			if jsonErr := json.Unmarshal([]byte(content), &issue); jsonErr == nil {
 				entry.Issue = &issue
@@ -255,7 +256,7 @@ func (s *FlatFileStore) History(_ context.Context, issueID string) ([]*storage.H
 	return entries, nil
 }
 
-func (s *FlatFileStore) AsOf(_ context.Context, issueID string, ref string) (*types.Issue, error) {
+func (s *FlatFileStore) AsOf(ctx context.Context, issueID string, ref string) (*types.Issue, error) {
 	if err := validateID(issueID); err != nil {
 		return nil, err
 	}
@@ -263,7 +264,7 @@ func (s *FlatFileStore) AsOf(_ context.Context, issueID string, ref string) (*ty
 		return nil, err
 	}
 	file := fmt.Sprintf(".beads/issues/%s.json", issueID)
-	content, err := s.git("show", ref+":"+file)
+	content, err := s.git(ctx, "show", ref+":"+file)
 	if err != nil {
 		return nil, storage.ErrNotFound
 	}
@@ -274,14 +275,14 @@ func (s *FlatFileStore) AsOf(_ context.Context, issueID string, ref string) (*ty
 	return &issue, nil
 }
 
-func (s *FlatFileStore) Diff(_ context.Context, fromRef, toRef string) ([]*storage.DiffEntry, error) {
+func (s *FlatFileStore) Diff(ctx context.Context, fromRef, toRef string) ([]*storage.DiffEntry, error) {
 	if err := validateGitArg("from ref", fromRef); err != nil {
 		return nil, err
 	}
 	if err := validateGitArg("to ref", toRef); err != nil {
 		return nil, err
 	}
-	out, err := s.git("diff", "--name-status", fromRef+".."+toRef, "--", ".beads/issues/")
+	out, err := s.git(ctx, "diff", "--name-status", fromRef+".."+toRef, "--", ".beads/issues/")
 	if err != nil || out == "" {
 		return nil, nil
 	}
@@ -321,24 +322,24 @@ func (s *FlatFileStore) Diff(_ context.Context, fromRef, toRef string) ([]*stora
 
 // ── RemoteStore ──────────────────────────────────────────────────────
 
-func (s *FlatFileStore) AddRemote(_ context.Context, name, url string) error {
+func (s *FlatFileStore) AddRemote(ctx context.Context, name, url string) error {
 	if err := validateGitArg("remote name", name); err != nil {
 		return err
 	}
-	_, err := s.git("remote", "add", name, url)
+	_, err := s.git(ctx, "remote", "add", name, url)
 	return err
 }
 
-func (s *FlatFileStore) RemoveRemote(_ context.Context, name string) error {
+func (s *FlatFileStore) RemoveRemote(ctx context.Context, name string) error {
 	if err := validateGitArg("remote name", name); err != nil {
 		return err
 	}
-	_, err := s.git("remote", "remove", name)
+	_, err := s.git(ctx, "remote", "remove", name)
 	return err
 }
 
-func (s *FlatFileStore) HasRemote(_ context.Context, name string) (bool, error) {
-	out, err := s.git("remote")
+func (s *FlatFileStore) HasRemote(ctx context.Context, name string) (bool, error) {
+	out, err := s.git(ctx, "remote")
 	if err != nil {
 		return false, err
 	}
@@ -350,8 +351,8 @@ func (s *FlatFileStore) HasRemote(_ context.Context, name string) (bool, error) 
 	return false, nil
 }
 
-func (s *FlatFileStore) ListRemotes(_ context.Context) ([]storage.RemoteInfo, error) {
-	out, err := s.git("remote", "-v")
+func (s *FlatFileStore) ListRemotes(ctx context.Context) ([]storage.RemoteInfo, error) {
+	out, err := s.git(ctx, "remote", "-v")
 	if err != nil || out == "" {
 		return nil, nil
 	}
@@ -372,24 +373,24 @@ func (s *FlatFileStore) ListRemotes(_ context.Context) ([]storage.RemoteInfo, er
 	return remotes, nil
 }
 
-func (s *FlatFileStore) Push(_ context.Context) error {
-	_, _ = s.git("add", ".beads/")
-	_, err := s.git("push")
+func (s *FlatFileStore) Push(ctx context.Context) error {
+	_, _ = s.git(ctx, "add", ".beads/")
+	_, err := s.git(ctx, "push")
 	return err
 }
 
-func (s *FlatFileStore) Pull(_ context.Context) error {
-	_, err := s.git("pull")
+func (s *FlatFileStore) Pull(ctx context.Context) error {
+	_, err := s.git(ctx, "pull")
 	return err
 }
 
-func (s *FlatFileStore) ForcePush(_ context.Context) error {
-	_, _ = s.git("add", ".beads/")
-	_, err := s.git("push", "--force")
+func (s *FlatFileStore) ForcePush(ctx context.Context) error {
+	_, _ = s.git(ctx, "add", ".beads/")
+	_, err := s.git(ctx, "push", "--force")
 	return err
 }
 
-func (s *FlatFileStore) PushRemote(_ context.Context, remote string, force bool) error {
+func (s *FlatFileStore) PushRemote(ctx context.Context, remote string, force bool) error {
 	if err := validateGitArg("remote", remote); err != nil {
 		return err
 	}
@@ -397,42 +398,42 @@ func (s *FlatFileStore) PushRemote(_ context.Context, remote string, force bool)
 	if force {
 		args = append(args, "--force")
 	}
-	_, err := s.git(args...)
+	_, err := s.git(ctx, args...)
 	return err
 }
 
-func (s *FlatFileStore) PullRemote(_ context.Context, remote string) error {
+func (s *FlatFileStore) PullRemote(ctx context.Context, remote string) error {
 	if err := validateGitArg("remote", remote); err != nil {
 		return err
 	}
-	_, err := s.git("pull", remote)
+	_, err := s.git(ctx, "pull", remote)
 	return err
 }
 
-func (s *FlatFileStore) Fetch(_ context.Context, peer string) error {
+func (s *FlatFileStore) Fetch(ctx context.Context, peer string) error {
 	if err := validateGitArg("peer", peer); err != nil {
 		return err
 	}
-	_, err := s.git("fetch", peer)
+	_, err := s.git(ctx, "fetch", peer)
 	return err
 }
 
-func (s *FlatFileStore) PushTo(_ context.Context, peer string) error {
+func (s *FlatFileStore) PushTo(ctx context.Context, peer string) error {
 	if err := validateGitArg("peer", peer); err != nil {
 		return err
 	}
-	_, _ = s.git("add", ".beads/")
-	_, err := s.git("push", peer)
+	_, _ = s.git(ctx, "add", ".beads/")
+	_, err := s.git(ctx, "push", peer)
 	return err
 }
 
-func (s *FlatFileStore) PullFrom(_ context.Context, peer string) ([]storage.Conflict, error) {
+func (s *FlatFileStore) PullFrom(ctx context.Context, peer string) ([]storage.Conflict, error) {
 	if err := validateGitArg("peer", peer); err != nil {
 		return nil, err
 	}
-	_, err := s.git("pull", peer)
+	_, err := s.git(ctx, "pull", peer)
 	if err != nil {
-		conflicts, _ := s.GetConflicts(context.Background())
+		conflicts, _ := s.GetConflicts(ctx)
 		return conflicts, err
 	}
 	return nil, nil
@@ -440,14 +441,14 @@ func (s *FlatFileStore) PullFrom(_ context.Context, peer string) ([]storage.Conf
 
 // ── SyncStore ────────────────────────────────────────────────────────
 
-func (s *FlatFileStore) Sync(_ context.Context, peer string, _ string) (*storage.SyncResult, error) {
+func (s *FlatFileStore) Sync(ctx context.Context, peer string, _ string) (*storage.SyncResult, error) {
 	if err := validateGitArg("peer", peer); err != nil {
 		return nil, err
 	}
 	start := time.Now()
 	result := &storage.SyncResult{Peer: peer, StartTime: start}
 
-	_, err := s.git("fetch", peer)
+	_, err := s.git(ctx, "fetch", peer)
 	if err != nil {
 		result.Error = err
 		result.EndTime = time.Now()
@@ -455,16 +456,16 @@ func (s *FlatFileStore) Sync(_ context.Context, peer string, _ string) (*storage
 	}
 	result.Fetched = true
 
-	_, err = s.git("merge", peer+"/main")
+	_, err = s.git(ctx, "merge", peer+"/main")
 	if err != nil {
-		result.Conflicts, _ = s.GetConflicts(context.Background())
+		result.Conflicts, _ = s.GetConflicts(ctx)
 		result.Error = err
 	} else {
 		result.Merged = true
 	}
 
-	_, _ = s.git("add", ".beads/")
-	_, pushErr := s.git("push", peer)
+	_, _ = s.git(ctx, "add", ".beads/")
+	_, pushErr := s.git(ctx, "push", peer)
 	if pushErr != nil {
 		result.PushError = pushErr
 	} else {
@@ -475,11 +476,11 @@ func (s *FlatFileStore) Sync(_ context.Context, peer string, _ string) (*storage
 	return result, result.Error
 }
 
-func (s *FlatFileStore) SyncStatus(_ context.Context, peer string) (*storage.SyncStatus, error) {
+func (s *FlatFileStore) SyncStatus(ctx context.Context, peer string) (*storage.SyncStatus, error) {
 	if err := validateGitArg("peer", peer); err != nil {
 		return nil, err
 	}
-	out, err := s.git("rev-list", "--left-right", "--count", "HEAD..."+peer+"/main")
+	out, err := s.git(ctx, "rev-list", "--left-right", "--count", "HEAD..."+peer+"/main")
 	if err != nil {
 		return &storage.SyncStatus{Peer: peer}, nil
 	}
@@ -500,18 +501,18 @@ func (s *FlatFileStore) SyncStatus(_ context.Context, peer string) (*storage.Syn
 
 var errFederationNotSupported = fmt.Errorf("flatfile: federation not supported (use git remotes instead)")
 
-func (s *FlatFileStore) AddFederationPeer(_ context.Context, _ *storage.FederationPeer) error {
+func (s *FlatFileStore) AddFederationPeer(ctx context.Context, _ *storage.FederationPeer) error {
 	return errFederationNotSupported
 }
 
-func (s *FlatFileStore) GetFederationPeer(_ context.Context, _ string) (*storage.FederationPeer, error) {
+func (s *FlatFileStore) GetFederationPeer(ctx context.Context, _ string) (*storage.FederationPeer, error) {
 	return nil, errFederationNotSupported
 }
 
-func (s *FlatFileStore) ListFederationPeers(_ context.Context) ([]*storage.FederationPeer, error) {
+func (s *FlatFileStore) ListFederationPeers(ctx context.Context) ([]*storage.FederationPeer, error) {
 	return nil, nil
 }
 
-func (s *FlatFileStore) RemoveFederationPeer(_ context.Context, _ string) error {
+func (s *FlatFileStore) RemoveFederationPeer(ctx context.Context, _ string) error {
 	return errFederationNotSupported
 }

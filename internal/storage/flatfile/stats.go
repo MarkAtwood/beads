@@ -46,6 +46,8 @@ func (s *FlatFileStore) GetStatistics(_ context.Context) (*types.Statistics, err
 			stats.BlockedIssues++
 		case types.StatusDeferred:
 			stats.DeferredIssues++
+		case types.StatusPinned, types.StatusHooked:
+			// Hooked issues are internal coordination state; no dedicated counter.
 		}
 
 		if issue.Pinned {

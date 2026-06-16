@@ -285,7 +285,7 @@ func sortReadyWork(issues []*types.Issue, policy types.SortPolicy) {
 		sort.Slice(issues, func(i, j int) bool {
 			return issues[i].CreatedAt.Before(issues[j].CreatedAt)
 		})
-	default: // hybrid and priority both sort by priority then date
+	case types.SortPolicyPriority, types.SortPolicyHybrid, "":
 		sort.Slice(issues, func(i, j int) bool {
 			if issues[i].Priority != issues[j].Priority {
 				return issues[i].Priority < issues[j].Priority

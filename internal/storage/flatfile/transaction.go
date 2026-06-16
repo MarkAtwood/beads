@@ -168,8 +168,8 @@ func (tx *flatFileTx) GetLocalMetadata(ctx context.Context, key string) (string,
 	return tx.s.GetLocalMetadata(ctx, key)
 }
 
-func (tx *flatFileTx) AddComment(_ context.Context, issueID, actor, comment string) error {
-	_, err := tx.s.AddIssueComment(context.Background(), issueID, actor, comment)
+func (tx *flatFileTx) AddComment(ctx context.Context, issueID, actor, comment string) error {
+	_, err := tx.s.AddIssueComment(ctx, issueID, actor, comment)
 	return err
 }
 
