@@ -222,6 +222,9 @@ func (s *FlatFileStore) ResolveConflicts(_ context.Context, _ string, strategy s
 // ── HistoryViewer ────────────────────────────────────────────────────
 
 func (s *FlatFileStore) History(_ context.Context, issueID string) ([]*storage.HistoryEntry, error) {
+	if err := validateID(issueID); err != nil {
+		return nil, err
+	}
 	file := fmt.Sprintf(".beads/issues/%s.json", issueID)
 	out, err := s.git("log", "--format=%H|%an|%aI", "--", file)
 	if err != nil || out == "" {
@@ -253,6 +256,9 @@ func (s *FlatFileStore) History(_ context.Context, issueID string) ([]*storage.H
 }
 
 func (s *FlatFileStore) AsOf(_ context.Context, issueID string, ref string) (*types.Issue, error) {
+	if err := validateID(issueID); err != nil {
+		return nil, err
+	}
 	if err := validateGitArg("ref", ref); err != nil {
 		return nil, err
 	}

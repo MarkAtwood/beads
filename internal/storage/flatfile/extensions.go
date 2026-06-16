@@ -243,8 +243,44 @@ func (s *FlatFileStore) UpdateIssueID(_ context.Context, oldID, newID string, is
 	if err := s.writeIssue(issue); err != nil {
 		return err
 	}
-	// Remove old file only after new file is safely written.
+	// Remove old issue file only after new file is safely written.
 	_ = os.Remove(s.issueFilename(oldID))
+
+	// Rename comments directory if it exists.
+	oldCommentDir := filepath.Join(s.commentsDir, oldID)
+	newCommentDir := filepath.Join(s.commentsDir, newID)
+	if _, err := os.Stat(oldCommentDir); err == nil {
+		_ = os.Rename(oldCommentDir, newCommentDir)
+	}
+
+	// Rename events file if it exists.
+	oldEventFile := s.eventFilename(oldID)
+	newEventFile := s.eventFilename(newID)
+	if _, err := os.Stat(oldEventFile); err == nil {
+		_ = os.Rename(oldEventFile, newEventFile)
+	}
+
+	// Update dependency references in all other issues.
+	all, err := s.loadAllIssues()
+	if err != nil {
+		return nil // best-effort: issue file already renamed
+	}
+	for _, other := range all {
+		changed := false
+		for _, dep := range other.Dependencies {
+			if dep.DependsOnID == oldID {
+				dep.DependsOnID = newID
+				changed = true
+			}
+			if dep.IssueID == oldID {
+				dep.IssueID = newID
+				changed = true
+			}
+		}
+		if changed {
+			_ = s.writeIssue(other)
+		}
+	}
 	return nil
 }
 
@@ -512,8 +548,8 @@ func (s *FlatFileStore) DetectCycles(_ context.Context) ([][]*types.Issue, error
 	var cycles [][]*types.Issue
 	var path []string
 
-	var dfs func(node string) bool
-	dfs = func(node string) bool {
+	var dfs func(node string)
+	dfs = func(node string) {
 		color[node] = gray
 		path = append(path, node)
 		for _, next := range adj[node] {
@@ -535,15 +571,12 @@ func (s *FlatFileStore) DetectCycles(_ context.Context) ([][]*types.Issue, error
 					}
 					cycles = append(cycles, cycle)
 				}
-				return true
-			}
-			if color[next] == white {
+			} else if color[next] == white {
 				dfs(next)
 			}
 		}
 		path = path[:len(path)-1]
 		color[node] = black
-		return false
 	}
 	for _, issue := range all {
 		if color[issue.ID] == white {
@@ -645,7 +678,10 @@ func (s *FlatFileStore) ImportIssueComment(_ context.Context, issueID, author, t
 		Text:      text,
 		CreatedAt: createdAt,
 	}
-	dir := filepath.Join(s.commentsDir, issueID)
+	dir, err := safePath(s.commentsDir, issueID, "")
+	if err != nil {
+		return nil, err
+	}
 	_ = os.MkdirAll(dir, 0o755)
 	filename := createdAt.Format("2006-01-02T15-04-05.000000000Z") + ".json"
 	data, err := json.MarshalIndent(comment, "", "  ")
