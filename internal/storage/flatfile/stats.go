@@ -62,13 +62,13 @@ func (s *FlatFileStore) GetStatistics(_ context.Context) (*types.Statistics, err
 	children := make(map[string][]*types.Issue)
 	for _, issue := range all {
 		for _, dep := range issue.Dependencies {
-			if dep.Type == "parent-child" {
+			if dep.Type == types.DepParentChild {
 				children[dep.DependsOnID] = append(children[dep.DependsOnID], issue)
 			}
 		}
 	}
 	for _, issue := range all {
-		if issue.IssueType != "epic" || issue.Status == types.StatusClosed {
+		if issue.IssueType != types.TypeEpic || issue.Status == types.StatusClosed {
 			continue
 		}
 		kids := children[issue.ID]

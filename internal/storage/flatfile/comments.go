@@ -25,8 +25,9 @@ func (s *FlatFileStore) AddIssueComment(_ context.Context, issueID, author, text
 	}
 
 	now := time.Now().UTC()
+	seq := s.commentSeq.Add(1)
 	comment := &types.Comment{
-		ID:        fmt.Sprintf("%d", now.UnixNano()),
+		ID:        fmt.Sprintf("%d-%d", now.UnixNano(), seq),
 		IssueID:   issueID,
 		Author:    author,
 		Text:      text,

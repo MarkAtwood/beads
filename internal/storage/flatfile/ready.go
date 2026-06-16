@@ -74,7 +74,7 @@ func (s *FlatFileStore) GetReadyWorkWithCounts(ctx context.Context, filter types
 	parentMap := make(map[string]string)
 	for _, a := range all {
 		for _, dep := range a.Dependencies {
-			if dep.Type == "parent-child" {
+			if dep.Type == types.DepParentChild {
 				parentMap[a.ID] = dep.DependsOnID
 			} else {
 				depCounts[dep.DependsOnID]++
@@ -86,7 +86,7 @@ func (s *FlatFileStore) GetReadyWorkWithCounts(ctx context.Context, filter types
 	for _, issue := range issues {
 		dc := 0
 		for _, dep := range issue.Dependencies {
-			if dep.Type != "parent-child" {
+			if dep.Type != types.DepParentChild {
 				dc++
 			}
 		}
@@ -132,7 +132,7 @@ func (s *FlatFileStore) GetBlockedIssues(_ context.Context, filter types.WorkFil
 
 		var blockers []string
 		for _, dep := range issue.Dependencies {
-			if dep.Type == "parent-child" {
+			if dep.Type == types.DepParentChild {
 				continue
 			}
 			if st, ok := statusMap[dep.DependsOnID]; ok && st != types.StatusClosed {
@@ -170,7 +170,7 @@ func (s *FlatFileStore) GetEpicsEligibleForClosure(_ context.Context) ([]*types.
 	children := make(map[string][]*types.Issue)
 	for _, issue := range all {
 		for _, dep := range issue.Dependencies {
-			if dep.Type == "parent-child" {
+			if dep.Type == types.DepParentChild {
 				children[dep.DependsOnID] = append(children[dep.DependsOnID], issue)
 			}
 		}
@@ -178,7 +178,7 @@ func (s *FlatFileStore) GetEpicsEligibleForClosure(_ context.Context) ([]*types.
 
 	var result []*types.EpicStatus
 	for _, issue := range all {
-		if issue.IssueType != "epic" || issue.Status == types.StatusClosed {
+		if issue.IssueType != types.TypeEpic || issue.Status == types.StatusClosed {
 			continue
 		}
 		kids := children[issue.ID]
@@ -217,7 +217,7 @@ func isDeferred(issue *types.Issue) bool {
 
 func hasOpenBlocker(issue *types.Issue, statusMap map[string]types.Status) bool {
 	for _, dep := range issue.Dependencies {
-		if dep.Type == "parent-child" {
+		if dep.Type == types.DepParentChild {
 			continue
 		}
 		if st, ok := statusMap[dep.DependsOnID]; ok && st != types.StatusClosed {
@@ -267,7 +267,7 @@ func matchesWorkFilter(issue *types.Issue, f types.WorkFilter) bool {
 	if f.ParentID != nil {
 		found := false
 		for _, dep := range issue.Dependencies {
-			if dep.Type == "parent-child" && dep.DependsOnID == *f.ParentID {
+			if dep.Type == types.DepParentChild && dep.DependsOnID == *f.ParentID {
 				found = true
 				break
 			}
@@ -285,14 +285,7 @@ func sortReadyWork(issues []*types.Issue, policy types.SortPolicy) {
 		sort.Slice(issues, func(i, j int) bool {
 			return issues[i].CreatedAt.Before(issues[j].CreatedAt)
 		})
-	case types.SortPolicyPriority:
-		sort.Slice(issues, func(i, j int) bool {
-			if issues[i].Priority != issues[j].Priority {
-				return issues[i].Priority < issues[j].Priority
-			}
-			return issues[i].CreatedAt.Before(issues[j].CreatedAt)
-		})
-	default: // hybrid
+	default: // hybrid and priority both sort by priority then date
 		sort.Slice(issues, func(i, j int) bool {
 			if issues[i].Priority != issues[j].Priority {
 				return issues[i].Priority < issues[j].Priority

@@ -55,7 +55,7 @@ func (s *FlatFileStore) RemoveDependency(_ context.Context, issueID, dependsOnID
 	filtered := make([]*types.Dependency, 0, len(issue.Dependencies))
 	found := false
 	for _, dep := range issue.Dependencies {
-		if dep.DependsOnID == dependsOnID && dep.Type != "parent-child" {
+		if dep.DependsOnID == dependsOnID && dep.Type != types.DepParentChild {
 			found = true
 			continue
 		}
@@ -84,7 +84,7 @@ func (s *FlatFileStore) GetDependencies(_ context.Context, issueID string) ([]*t
 
 	var result []*types.Issue
 	for _, dep := range issue.Dependencies {
-		if dep.Type == "parent-child" {
+		if dep.Type == types.DepParentChild {
 			continue
 		}
 		target, err := s.readIssue(dep.DependsOnID)
@@ -110,7 +110,7 @@ func (s *FlatFileStore) GetDependents(_ context.Context, issueID string) ([]*typ
 	var result []*types.Issue
 	for _, issue := range all {
 		for _, dep := range issue.Dependencies {
-			if dep.DependsOnID == issueID && dep.Type != "parent-child" {
+			if dep.DependsOnID == issueID && dep.Type != types.DepParentChild {
 				result = append(result, issue)
 				break
 			}
@@ -190,7 +190,7 @@ func (s *FlatFileStore) GetDependencyTree(_ context.Context, issueID string, max
 	adj := make(map[string][]string)
 	for _, issue := range all {
 		for _, dep := range issue.Dependencies {
-			if dep.Type == "parent-child" {
+			if dep.Type == types.DepParentChild {
 				continue
 			}
 			if reverse {
@@ -244,7 +244,7 @@ func (s *FlatFileStore) CountDependencies(_ context.Context, issueID string) (in
 
 	var count int64
 	for _, dep := range issue.Dependencies {
-		if dep.Type != "parent-child" {
+		if dep.Type != types.DepParentChild {
 			count++
 		}
 	}
@@ -265,7 +265,7 @@ func (s *FlatFileStore) CountDependents(_ context.Context, issueID string) (int6
 	var count int64
 	for _, issue := range all {
 		for _, dep := range issue.Dependencies {
-			if dep.DependsOnID == issueID && dep.Type != "parent-child" {
+			if dep.DependsOnID == issueID && dep.Type != types.DepParentChild {
 				count++
 				break
 			}

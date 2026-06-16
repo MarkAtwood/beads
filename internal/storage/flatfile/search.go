@@ -25,9 +25,15 @@ func (s *FlatFileStore) SearchIssues(_ context.Context, query string, filter typ
 		return nil, err
 	}
 
+	// Pre-compile label regex once for the entire search.
+	var labelRe *regexp.Regexp
+	if filter.LabelRegex != "" {
+		labelRe, _ = regexp.Compile(filter.LabelRegex)
+	}
+
 	var result []*types.Issue
 	for _, issue := range all {
-		if matchesQuery(issue, query) && matchesFilter(issue, filter) {
+		if matchesQuery(issue, query) && matchesFilter(issue, filter, labelRe) {
 			result = append(result, issue)
 		}
 	}
@@ -62,7 +68,7 @@ func (s *FlatFileStore) SearchIssuesWithCounts(ctx context.Context, query string
 	parentMap := make(map[string]string)
 	for _, a := range all {
 		for _, dep := range a.Dependencies {
-			if dep.Type == "parent-child" {
+			if dep.Type == types.DepParentChild {
 				parentMap[a.ID] = dep.DependsOnID
 			} else {
 				depCounts[dep.DependsOnID]++
@@ -74,7 +80,7 @@ func (s *FlatFileStore) SearchIssuesWithCounts(ctx context.Context, query string
 	for _, issue := range issues {
 		depCount := 0
 		for _, dep := range issue.Dependencies {
-			if dep.Type != "parent-child" {
+			if dep.Type != types.DepParentChild {
 				depCount++
 			}
 		}
@@ -178,7 +184,8 @@ func matchesQuery(issue *types.Issue, query string) bool {
 }
 
 // matchesFilter returns true if the issue matches all filter criteria.
-func matchesFilter(issue *types.Issue, f types.IssueFilter) bool {
+// labelRe is the pre-compiled LabelRegex (nil if not set).
+func matchesFilter(issue *types.Issue, f types.IssueFilter, labelRe *regexp.Regexp) bool {
 	// Status filters
 	if f.Status != nil && issue.Status != *f.Status {
 		return false
@@ -230,9 +237,14 @@ func matchesFilter(issue *types.Issue, f types.IssueFilter) bool {
 		return false
 	}
 
+	// Labels — build set once for all label checks.
+	needLabelSet := len(f.Labels) > 0 || len(f.LabelsAny) > 0 || len(f.ExcludeLabels) > 0
+	var labelSet map[string]bool
+	if needLabelSet {
+		labelSet = makeStringSet(issue.Labels)
+	}
 	// Labels (AND semantics)
 	if len(f.Labels) > 0 {
-		labelSet := makeStringSet(issue.Labels)
 		for _, l := range f.Labels {
 			if !labelSet[l] {
 				return false
@@ -241,7 +253,6 @@ func matchesFilter(issue *types.Issue, f types.IssueFilter) bool {
 	}
 	// Labels (OR semantics)
 	if len(f.LabelsAny) > 0 {
-		labelSet := makeStringSet(issue.Labels)
 		found := false
 		for _, l := range f.LabelsAny {
 			if labelSet[l] {
@@ -255,7 +266,6 @@ func matchesFilter(issue *types.Issue, f types.IssueFilter) bool {
 	}
 	// Label exclusion
 	if len(f.ExcludeLabels) > 0 {
-		labelSet := makeStringSet(issue.Labels)
 		for _, l := range f.ExcludeLabels {
 			if labelSet[l] {
 				return false
@@ -275,20 +285,17 @@ func matchesFilter(issue *types.Issue, f types.IssueFilter) bool {
 			return false
 		}
 	}
-	// Label regex
-	if f.LabelRegex != "" {
-		re, err := regexp.Compile(f.LabelRegex)
-		if err == nil {
-			found := false
-			for _, l := range issue.Labels {
-				if re.MatchString(l) {
-					found = true
-					break
-				}
+	// Label regex (pre-compiled)
+	if labelRe != nil {
+		found := false
+		for _, l := range issue.Labels {
+			if labelRe.MatchString(l) {
+				found = true
+				break
 			}
-			if !found {
-				return false
-			}
+		}
+		if !found {
+			return false
 		}
 	}
 	if f.NoLabels && len(issue.Labels) > 0 {
@@ -487,7 +494,7 @@ func matchesFilter(issue *types.Issue, f types.IssueFilter) bool {
 	if f.ParentID != nil {
 		found := false
 		for _, dep := range issue.Dependencies {
-			if dep.Type == "parent-child" && dep.DependsOnID == *f.ParentID {
+			if dep.Type == types.DepParentChild && dep.DependsOnID == *f.ParentID {
 				found = true
 				break
 			}
@@ -498,7 +505,7 @@ func matchesFilter(issue *types.Issue, f types.IssueFilter) bool {
 	}
 	if f.NoParent {
 		for _, dep := range issue.Dependencies {
-			if dep.Type == "parent-child" {
+			if dep.Type == types.DepParentChild {
 				return false
 			}
 		}

@@ -85,7 +85,7 @@ func (tx *flatFileTx) CycleThroughEdges(_ context.Context, edges [][2]string) (s
 	adj := make(map[string][]string)
 	for _, issue := range all {
 		for _, dep := range issue.Dependencies {
-			if dep.Type != "parent-child" {
+			if dep.Type != types.DepParentChild {
 				adj[issue.ID] = append(adj[issue.ID], dep.DependsOnID)
 			}
 		}

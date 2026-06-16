@@ -2,11 +2,13 @@ package flatfile
 
 import (
 	"context"
+	"sort"
 
 	"github.com/steveyegge/beads/internal/types"
 )
 
-// ListWisps returns ephemeral issues matching the filter.
+// ListWisps returns ephemeral issues matching the filter, sorted by
+// priority ascending then created_at descending (matching Dolt behavior).
 func (s *FlatFileStore) ListWisps(_ context.Context, filter types.WispFilter) ([]*types.Issue, error) {
 	if err := s.checkClosed(); err != nil {
 		return nil, err
@@ -26,9 +28,17 @@ func (s *FlatFileStore) ListWisps(_ context.Context, filter types.WispFilter) ([
 			continue
 		}
 		result = append(result, issue)
-		if filter.Limit > 0 && len(result) >= filter.Limit {
-			break
+	}
+
+	sort.Slice(result, func(i, j int) bool {
+		if result[i].Priority != result[j].Priority {
+			return result[i].Priority < result[j].Priority
 		}
+		return result[i].CreatedAt.After(result[j].CreatedAt)
+	})
+
+	if filter.Limit > 0 && len(result) > filter.Limit {
+		result = result[:filter.Limit]
 	}
 	return result, nil
 }

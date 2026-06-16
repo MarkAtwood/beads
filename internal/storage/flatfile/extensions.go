@@ -225,13 +225,17 @@ func (s *FlatFileStore) DeleteIssuesBySourceRepo(_ context.Context, sourceRepo s
 		return 0, err
 	}
 	deleted := 0
+	var lastErr error
 	for _, issue := range all {
 		if issue.SourceRepo == sourceRepo {
-			_ = os.Remove(s.issueFilename(issue.ID))
+			if err := os.Remove(s.issueFilename(issue.ID)); err != nil && !errors.Is(err, fs.ErrNotExist) {
+				lastErr = err
+				continue
+			}
 			deleted++
 		}
 	}
-	return deleted, nil
+	return deleted, lastErr
 }
 
 func (s *FlatFileStore) UpdateIssueID(_ context.Context, oldID, newID string, issue *types.Issue, _ string) error {
@@ -396,7 +400,7 @@ func (s *FlatFileStore) GetDependencyCounts(_ context.Context, issueIDs []string
 	depCounts := make(map[string]int)
 	for _, issue := range all {
 		for _, dep := range issue.Dependencies {
-			if dep.Type != "parent-child" {
+			if dep.Type != types.DepParentChild {
 				depCounts[dep.DependsOnID]++
 			}
 		}
@@ -409,7 +413,7 @@ func (s *FlatFileStore) GetDependencyCounts(_ context.Context, issueIDs []string
 		}
 		dc := 0
 		for _, dep := range issue.Dependencies {
-			if dep.Type != "parent-child" {
+			if dep.Type != types.DepParentChild {
 				dc++
 			}
 		}
@@ -436,7 +440,7 @@ func (s *FlatFileStore) GetBlockingInfoForIssues(_ context.Context, issueIDs []s
 
 	for _, issue := range all {
 		for _, dep := range issue.Dependencies {
-			if dep.Type == "parent-child" {
+			if dep.Type == types.DepParentChild {
 				if idSet[issue.ID] {
 					parentMap[issue.ID] = dep.DependsOnID
 				}
@@ -471,7 +475,7 @@ func (s *FlatFileStore) IsBlocked(_ context.Context, issueID string) (bool, []st
 	}
 	var blockers []string
 	for _, dep := range issue.Dependencies {
-		if dep.Type == "parent-child" {
+		if dep.Type == types.DepParentChild {
 			continue
 		}
 		if st, ok := statusMap[dep.DependsOnID]; ok && st != types.StatusClosed {
@@ -503,7 +507,7 @@ func (s *FlatFileStore) GetNewlyUnblockedByClose(_ context.Context, closedIssueI
 		dependsOnClosed := false
 		allResolved := true
 		for _, dep := range issue.Dependencies {
-			if dep.Type == "parent-child" {
+			if dep.Type == types.DepParentChild {
 				continue
 			}
 			if dep.DependsOnID == closedIssueID {
@@ -533,7 +537,7 @@ func (s *FlatFileStore) DetectCycles(_ context.Context) ([][]*types.Issue, error
 	for _, issue := range all {
 		issueMap[issue.ID] = issue
 		for _, dep := range issue.Dependencies {
-			if dep.Type != "parent-child" {
+			if dep.Type != types.DepParentChild {
 				adj[issue.ID] = append(adj[issue.ID], dep.DependsOnID)
 			}
 		}
@@ -598,7 +602,7 @@ func (s *FlatFileStore) FindWispDependentsRecursive(_ context.Context, ids []str
 	dependents := make(map[string][]string)
 	for _, issue := range all {
 		for _, dep := range issue.Dependencies {
-			if dep.Type != "parent-child" {
+			if dep.Type != types.DepParentChild {
 				dependents[dep.DependsOnID] = append(dependents[dep.DependsOnID], issue.ID)
 			}
 		}
@@ -651,7 +655,7 @@ func (s *FlatFileStore) CountDependentsByStatus(_ context.Context, issueID strin
 			continue
 		}
 		for _, dep := range issue.Dependencies {
-			if dep.DependsOnID == issueID && dep.Type != "parent-child" {
+			if dep.DependsOnID == issueID && dep.Type != types.DepParentChild {
 				count++
 				break
 			}
@@ -786,21 +790,18 @@ func (s *FlatFileStore) GetCustomTypes(_ context.Context) ([]string, error) {
 	return nil, nil
 }
 
+var infraTypes = map[string]bool{
+	"gate":          true,
+	"molecule":      true,
+	"merge-request": true,
+}
+
 func (s *FlatFileStore) GetInfraTypes(_ context.Context) map[string]bool {
-	return map[string]bool{
-		"gate":          true,
-		"molecule":      true,
-		"merge-request": true,
-	}
+	return infraTypes
 }
 
 func (s *FlatFileStore) IsInfraTypeCtx(_ context.Context, t types.IssueType) bool {
-	infra := map[string]bool{
-		"gate":          true,
-		"molecule":      true,
-		"merge-request": true,
-	}
-	return infra[string(t)]
+	return infraTypes[string(t)]
 }
 
 // ── AdvancedQueryStore ───────────────────────────────────────────────
@@ -855,7 +856,7 @@ func (s *FlatFileStore) GetMoleculeProgress(_ context.Context, moleculeID string
 	stats := &types.MoleculeProgressStats{MoleculeID: moleculeID}
 	for _, issue := range all {
 		for _, dep := range issue.Dependencies {
-			if dep.Type == "parent-child" && dep.DependsOnID == moleculeID {
+			if dep.Type == types.DepParentChild && dep.DependsOnID == moleculeID {
 				stats.Total++
 				if issue.Status == types.StatusClosed {
 					stats.Completed++
@@ -896,7 +897,7 @@ func (s *FlatFileStore) GetMoleculeLastActivity(_ context.Context, moleculeID st
 	var latest time.Time
 	for _, issue := range all {
 		for _, dep := range issue.Dependencies {
-			if dep.Type == "parent-child" && dep.DependsOnID == moleculeID {
+			if dep.Type == types.DepParentChild && dep.DependsOnID == moleculeID {
 				if issue.UpdatedAt.After(latest) {
 					latest = issue.UpdatedAt
 					result.LastActivity = latest
