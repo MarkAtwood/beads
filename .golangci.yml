@@ -57,7 +57,7 @@ linters:
           - gosec
         text: "G304"
       # G304/G306: Flat-file backend reads/writes issue JSON files at known paths with 0644
-      - path: 'internal/storage/flatfile/|cmd/bd/migrate_flatfile\.go'
+      - path: 'internal/storage/flatfile/|cmd/bd/migrate_flatfile\.go|cmd/bd/doctor/flatfile\.go'
         linters:
           - gosec
         text: "G304|G306|G302"

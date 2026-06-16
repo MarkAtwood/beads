@@ -184,6 +184,19 @@ Examples:
   bd doctor --migration=post   # Validate Dolt migration completed
   bd doctor --migration=pre --json  # Machine-parseable migration validation`,
 	Run: func(cmd *cobra.Command, args []string) {
+		// Flat-file backend: run flatfile doctor directly (no SQL server needed).
+		if beadsDir := doctor.ResolveBeadsDirForRepo("."); doctor.IsFlatfileBackend(beadsDir) {
+			result := runDiagnostics(".")
+			if jsonOutput {
+				exportDiagnostics(result, "")
+			} else {
+				printDiagnostics(result)
+			}
+			if !result.OverallOK {
+				os.Exit(1)
+			}
+			return
+		}
 		if !usesSQLServer() {
 			fmt.Fprintln(os.Stderr, "Note: 'bd doctor' is not yet supported in embedded mode.")
 			fmt.Fprintln(os.Stderr, "")
@@ -426,6 +439,18 @@ func runDiagnostics(path string) doctorResult {
 	result.Checks = append(result.Checks, managedHandoffCheck)
 	if managedHandoffCheck.Status == statusWarning || managedHandoffCheck.Status == statusError {
 		result.OverallOK = false
+	}
+
+	// Flat-file backend: run flatfile-specific checks and skip Dolt checks.
+	if doctor.IsFlatfileBackend(beadsDir) {
+		for _, dc := range doctor.RunFlatfileChecks(beadsDir) {
+			check := convertDoctorCheck(dc)
+			result.Checks = append(result.Checks, check)
+			if check.Status == statusError {
+				result.OverallOK = false
+			}
+		}
+		return result
 	}
 
 	// bd-jgxi: Auto-migrate database version before checking it.
