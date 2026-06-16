@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/steveyegge/beads/internal/idgen"
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/types"
 )
@@ -26,6 +27,24 @@ func (s *FlatFileStore) issueFilename(id string) string {
 // safeIssueFilename returns the path after validating the ID is safe.
 func (s *FlatFileStore) safeIssueFilename(id string) (string, error) {
 	return safePath(s.issuesDir, id, ".json")
+}
+
+// generateID creates a hash-based issue ID, checking the filesystem for collisions.
+// Mirrors the algorithm in issueops.GenerateIssueIDInTable.
+func (s *FlatFileStore) generateID(prefix string, issue *types.Issue, actor string) (string, error) {
+	const maxLength = 8
+	baseLength := 4
+
+	for length := baseLength; length <= maxLength; length++ {
+		for nonce := 0; nonce < 10; nonce++ {
+			candidate := idgen.GenerateHashID(prefix, issue.Title, issue.Description, actor, issue.CreatedAt, length, nonce)
+			path := s.issueFilename(candidate)
+			if _, err := os.Stat(path); os.IsNotExist(err) {
+				return candidate, nil
+			}
+		}
+	}
+	return "", fmt.Errorf("flatfile: failed to generate unique ID after trying lengths %d-%d", baseLength, maxLength)
 }
 
 // readIssue reads and unmarshals a single issue file.
@@ -98,13 +117,32 @@ func (s *FlatFileStore) loadAllIssues() ([]*types.Issue, error) {
 	return issues, nil
 }
 
-// CreateIssue writes a new issue to disk.
-func (s *FlatFileStore) CreateIssue(_ context.Context, issue *types.Issue, actor string) error {
+// CreateIssue writes a new issue to disk. If issue.ID is empty, a hash-based
+// ID is generated from the issue prefix, title, description, and timestamp.
+func (s *FlatFileStore) CreateIssue(ctx context.Context, issue *types.Issue, actor string) error {
 	if err := s.checkClosed(); err != nil {
 		return err
 	}
+
+	// Generate ID if not provided.
 	if issue.ID == "" {
-		return fmt.Errorf("flatfile: issue ID is required")
+		prefix, _ := s.GetConfig(ctx, "issue_prefix")
+		if prefix == "" {
+			return fmt.Errorf("flatfile: cannot generate ID: issue_prefix not configured")
+		}
+		if issue.PrefixOverride != "" {
+			prefix = issue.PrefixOverride
+		} else if issue.IDPrefix != "" {
+			prefix = prefix + "-" + issue.IDPrefix
+		}
+		if issue.CreatedAt.IsZero() {
+			issue.CreatedAt = time.Now().UTC()
+		}
+		id, err := s.generateID(prefix, issue, actor)
+		if err != nil {
+			return err
+		}
+		issue.ID = id
 	}
 
 	// Check for existing issue with same ID.

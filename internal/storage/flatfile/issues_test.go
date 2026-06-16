@@ -2,6 +2,8 @@ package flatfile
 
 import (
 	"context"
+	"fmt"
+	"strings"
 	"testing"
 	"time"
 
@@ -278,5 +280,71 @@ func TestOperationsAfterClose(t *testing.T) {
 	}
 	if err := s.DeleteIssue(ctx, "x"); err == nil {
 		t.Error("DeleteIssue after Close: expected error")
+	}
+}
+
+func TestCreateIssueAutoID(t *testing.T) {
+	s := newTestStore(t)
+
+	// Set prefix so ID generation works.
+	s.SetConfig(ctx, "issue_prefix", "test")
+
+	issue := &types.Issue{
+		Title:       "Auto-generated ID",
+		Description: "Should get a hash-based ID",
+	}
+
+	if err := s.CreateIssue(ctx, issue, "tester"); err != nil {
+		t.Fatalf("CreateIssue with auto ID: %v", err)
+	}
+
+	if issue.ID == "" {
+		t.Fatal("issue.ID should be set after CreateIssue")
+	}
+	if !strings.HasPrefix(issue.ID, "test-") {
+		t.Errorf("issue.ID = %q, want prefix 'test-'", issue.ID)
+	}
+
+	// Verify it was persisted.
+	got, err := s.GetIssue(ctx, issue.ID)
+	if err != nil {
+		t.Fatalf("GetIssue(%s): %v", issue.ID, err)
+	}
+	if got.Title != "Auto-generated ID" {
+		t.Errorf("title = %q", got.Title)
+	}
+}
+
+func TestCreateIssueAutoIDUnique(t *testing.T) {
+	s := newTestStore(t)
+	s.SetConfig(ctx, "issue_prefix", "uniq")
+
+	ids := make(map[string]bool)
+	for i := 0; i < 20; i++ {
+		issue := &types.Issue{
+			Title:       fmt.Sprintf("Issue %d", i),
+			Description: fmt.Sprintf("Description %d", i),
+		}
+		if err := s.CreateIssue(ctx, issue, "tester"); err != nil {
+			t.Fatalf("CreateIssue %d: %v", i, err)
+		}
+		if ids[issue.ID] {
+			t.Fatalf("duplicate ID: %s", issue.ID)
+		}
+		ids[issue.ID] = true
+	}
+}
+
+func TestCreateIssueNoPrefix(t *testing.T) {
+	s := newTestStore(t)
+	// Don't set prefix.
+
+	issue := &types.Issue{Title: "No prefix"}
+	err := s.CreateIssue(ctx, issue, "tester")
+	if err == nil {
+		t.Fatal("expected error when no prefix configured")
+	}
+	if !strings.Contains(err.Error(), "issue_prefix") {
+		t.Errorf("error = %q, want mention of issue_prefix", err)
 	}
 }
