@@ -40,10 +40,17 @@ The flat-file backend uses git for sync instead of Dolt remotes.`,
 			return
 		}
 
-		// Open current Dolt store.
+		// Open current Dolt store in read-only mode to bypass schema migration.
+		// The PersistentPreRun store may fail on schema skew, so we open our own.
 		s := getStore()
 		if s == nil {
-			FatalError("no database connection; is Dolt running?")
+			// PersistentPreRun failed (schema skew, etc.) — try read-only open.
+			var err error
+			s, err = newReadOnlyStoreFromConfig(context.Background(), beadsDir)
+			if err != nil {
+				FatalError("no database connection: %v\nIs Dolt running? Try: BD_IGNORE_SCHEMA_SKEW=1 bd migrate flatfile", err)
+			}
+			defer s.Close()
 		}
 		ctx := context.Background()
 
