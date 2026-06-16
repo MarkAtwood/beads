@@ -753,8 +753,7 @@ func (s *FlatFileStore) FindWispDependentsRecursive(_ context.Context, ids []str
 		}
 	}
 	result := make(map[string]bool)
-	queue := make([]string, len(ids))
-	copy(queue, ids)
+	queue := append([]string{}, ids...)
 	for len(queue) > 0 {
 		id := queue[0]
 		queue = queue[1:]
@@ -1003,7 +1002,8 @@ func (s *FlatFileStore) GetMoleculeProgress(_ context.Context, moleculeID string
 		for _, dep := range issue.Dependencies {
 			if dep.Type == types.DepParentChild && dep.DependsOnID == moleculeID {
 				stats.Total++
-				if issue.Status == types.StatusClosed {
+				switch issue.Status { //nolint:exhaustive // only closed/in-progress affect molecule progress
+				case types.StatusClosed:
 					stats.Completed++
 					if issue.ClosedAt != nil {
 						if stats.FirstClosed == nil || issue.ClosedAt.Before(*stats.FirstClosed) {
@@ -1013,11 +1013,13 @@ func (s *FlatFileStore) GetMoleculeProgress(_ context.Context, moleculeID string
 							stats.LastClosed = issue.ClosedAt
 						}
 					}
-				} else if issue.Status == types.StatusInProgress {
+				case types.StatusInProgress:
 					stats.InProgress++
 					if stats.CurrentStepID == "" {
 						stats.CurrentStepID = issue.ID
 					}
+				default:
+					// Other statuses don't affect molecule progress.
 				}
 				break
 			}

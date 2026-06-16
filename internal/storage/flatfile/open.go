@@ -67,7 +67,8 @@ func CheckGitignored(beadsDir string) string {
 	repoRoot := filepath.Dir(beadsDir)
 
 	// Use git check-ignore to test whether the issues dir is ignored.
-	cmd := exec.Command("git", "check-ignore", "-q", issuesDir)
+	ctx := context.Background()
+	cmd := exec.CommandContext(ctx, "git", "check-ignore", "-q", issuesDir)
 	cmd.Dir = repoRoot
 	if err := cmd.Run(); err != nil {
 		// Exit code 1 = not ignored (good). Other errors = no git repo.
@@ -75,7 +76,7 @@ func CheckGitignored(beadsDir string) string {
 	}
 
 	// The issues dir IS ignored. Figure out why.
-	cmd2 := exec.Command("git", "check-ignore", "-v", issuesDir)
+	cmd2 := exec.CommandContext(ctx, "git", "check-ignore", "-v", issuesDir)
 	cmd2.Dir = repoRoot
 	out, _ := cmd2.Output()
 	source := strings.TrimSpace(string(out))
