@@ -2400,6 +2400,11 @@ func runInitFlatfile(ctx context.Context, beadsDir, prefix string, quiet, skipHo
 		fmt.Printf("✓ Initialized flat-file beads with prefix %q\n", issuePrefix)
 	}
 
+	// Warn if .beads/issues/ would be gitignored.
+	if warning := flatfile.CheckGitignored(beadsDir); warning != "" {
+		fmt.Fprintf(os.Stderr, "\n%s\n\n", warning)
+	}
+
 	// Install hooks (reuse existing logic).
 	if !skipHooks && isGitRepo() {
 		if !hooksInstalled() || hooksNeedUpdate() {

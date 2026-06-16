@@ -164,6 +164,11 @@ The flat-file backend uses git for sync instead of Dolt remotes.`,
 
 		_ = ffStore.Close()
 
+		// Warn if issues would be gitignored after migration.
+		if warning := flatfile.CheckGitignored(beadsDir); warning != "" {
+			fmt.Fprintf(os.Stderr, "\n%s\n", warning)
+		}
+
 		fmt.Println("\nMigration complete. The flat-file backend is now active.")
 		fmt.Println("You can remove the Dolt data directory to reclaim space:")
 		fmt.Printf("  rm -rf %s/dolt %s/embeddeddolt\n", beadsDir, beadsDir)
