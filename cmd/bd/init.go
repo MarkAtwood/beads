@@ -249,11 +249,11 @@ Non-interactive mode (--non-interactive or BD_NON_INTERACTIVE=1):
 			externalConfig = &cfg
 		}
 
-		// Backend selection: dolt (default) + the pluggable SQL-family backends
-		// (postgres, mysql, sqlite) + the flat-file backend. SQLite was removed
-		// under the one-backend assumption (#3151) and re-added as a pluggable
-		// leaf backend. Flatfile flows through the shared (Dolt-ish) init path
-		// below rather than dispatching to its own arm.
+		// Backend selection: dolt + the pluggable SQL-family backends
+		// (postgres, mysql, sqlite) + the flat-file backend (the default). SQLite
+		// was removed under the one-backend assumption (#3151) and re-added as a
+		// pluggable leaf backend. Flatfile flows through the shared (Dolt-ish) init
+		// path below rather than dispatching to its own arm.
 		isPostgres := backendFlag == configfile.BackendPostgres
 		isMySQL := backendFlag == configfile.BackendMySQL
 		isSQLite := backendFlag == configfile.BackendSQLite
@@ -324,11 +324,11 @@ Non-interactive mode (--non-interactive or BD_NON_INTERACTIVE=1):
 			return fmt.Errorf("--team requires interactive prompts and cannot be used with --non-interactive")
 		}
 
-		// Select backend. The Dolt (default) and flat-file backends share this
-		// init path; postgres/mysql/sqlite dispatch to their own init arms below.
-		backend := configfile.BackendDolt
-		if backendFlag == "flatfile" {
-			backend = configfile.BackendFlatfile
+		// Select backend. Flat-file is the default; Dolt and flat-file share this
+		// init path, while postgres/mysql/sqlite dispatch to their own arms below.
+		backend := configfile.BackendFlatfile
+		if backendFlag == configfile.BackendDolt {
+			backend = configfile.BackendDolt
 		}
 
 		// Also treat BEADS_DOLT_SERVER_MODE=1 env var as --server.
@@ -2159,8 +2159,8 @@ func init() {
 	initCmd.Flags().Bool("non-interactive", false, "Skip all interactive prompts (auto-detected in CI or non-TTY environments)")
 	initCmd.Flags().String("role", "", "Set beads role without prompting: \"maintainer\" or \"contributor\"")
 
-	// Backend selection: dolt (default) plus the SQL-family backends (postgres/mysql/sqlite).
-	initCmd.Flags().String("backend", "", "Storage backend: dolt (default), postgres, mysql, or sqlite. See docs/STORAGE-BACKENDS.md.")
+	// Backend selection: flatfile (default), dolt, plus the SQL-family backends (postgres/mysql/sqlite).
+	initCmd.Flags().String("backend", "", "Storage backend: flatfile (default), dolt, postgres, mysql, or sqlite. See docs/STORAGE-BACKENDS.md.")
 	initCmd.Flags().String("pg-url", "", "Postgres connection URL (with --backend=postgres). A password may be included for init but is never persisted; set BEADS_PG_PASSWORD for later commands. Falls back to BEADS_POSTGRES_URL.")
 	initCmd.Flags().String("pg-schema", "", "Postgres schema for this workspace's tables (with --backend=postgres; provides search_path isolation)")
 	initCmd.Flags().String("mysql-url", "", "MySQL server DSN (with --backend=mysql), e.g. user:pass@tcp(host:3306)/ . A password may be included for init but is never persisted; set BEADS_MYSQL_PASSWORD for later commands. Falls back to BEADS_MYSQL_URL.")
