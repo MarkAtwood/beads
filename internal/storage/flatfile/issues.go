@@ -8,6 +8,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"time"
 
@@ -63,9 +64,28 @@ func (s *FlatFileStore) readIssue(id string) (*types.Issue, error) {
 
 	var issue types.Issue
 	if err := json.Unmarshal(data, &issue); err != nil {
+		// Attempt to repair non-RFC3339 timestamps (e.g. MySQL datetime
+		// "2026-06-22 14:31:53" instead of "2026-06-22T14:31:53Z").
+		if repaired := repairMySQLTimestamps(data); repaired != nil {
+			if err2 := json.Unmarshal(repaired, &issue); err2 == nil {
+				return &issue, nil
+			}
+		}
 		return nil, fmt.Errorf("flatfile: unmarshal issue %s: %w", id, err)
 	}
 	return &issue, nil
+}
+
+// mysqlDatetimeRe matches MySQL datetime strings inside JSON values.
+var mysqlDatetimeRe = regexp.MustCompile(`"(\d{4}-\d{2}-\d{2}) (\d{2}:\d{2}:\d{2})"`)
+
+// repairMySQLTimestamps rewrites MySQL datetime strings to RFC3339 in raw JSON.
+// Returns nil if no replacements were made.
+func repairMySQLTimestamps(data []byte) []byte {
+	if !mysqlDatetimeRe.Match(data) {
+		return nil
+	}
+	return mysqlDatetimeRe.ReplaceAll(data, []byte(`"${1}T${2}Z"`))
 }
 
 // writeIssue marshals and writes an issue to disk atomically.

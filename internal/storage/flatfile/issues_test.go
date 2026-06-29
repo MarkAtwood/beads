@@ -3,6 +3,7 @@ package flatfile
 import (
 	"context"
 	"fmt"
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -346,5 +347,82 @@ func TestCreateIssueNoPrefix(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "issue_prefix") {
 		t.Errorf("error = %q, want mention of issue_prefix", err)
+	}
+}
+
+func TestReadIssueMySQLTimestamp(t *testing.T) {
+	s := newTestStore(t)
+
+	// Write a JSON file with MySQL-format datetime in a dependency.
+	issueJSON := `{
+  "id": "ts-mysql-1",
+  "title": "Has MySQL timestamps",
+  "status": "open",
+  "priority": 2,
+  "created_at": "2026-06-22T21:02:52Z",
+  "updated_at": "2026-06-22T21:02:52Z",
+  "dependencies": [
+    {
+      "issue_id": "ts-mysql-1",
+      "depends_on_id": "ts-mysql-2",
+      "type": "blocks",
+      "created_at": "2026-06-22 14:31:53"
+    }
+  ]
+}
+`
+	os.WriteFile(s.issueFilename("ts-mysql-1"), []byte(issueJSON), 0o644)
+
+	got, err := s.readIssue("ts-mysql-1")
+	if err != nil {
+		t.Fatalf("readIssue with MySQL timestamp: %v", err)
+	}
+	if len(got.Dependencies) != 1 {
+		t.Fatalf("got %d dependencies, want 1", len(got.Dependencies))
+	}
+	dep := got.Dependencies[0]
+	want := time.Date(2026, 6, 22, 14, 31, 53, 0, time.UTC)
+	if !dep.CreatedAt.Equal(want) {
+		t.Errorf("dep.CreatedAt = %v, want %v", dep.CreatedAt, want)
+	}
+}
+
+func TestRepairMySQLTimestamps(t *testing.T) {
+	tests := []struct {
+		name  string
+		input string
+		want  string
+		isNil bool
+	}{
+		{
+			name:  "no timestamps to repair",
+			input: `{"created_at": "2026-06-22T14:31:53Z"}`,
+			isNil: true,
+		},
+		{
+			name:  "mysql datetime",
+			input: `{"created_at": "2026-06-22 14:31:53"}`,
+			want:  `{"created_at": "2026-06-22T14:31:53Z"}`,
+		},
+		{
+			name:  "multiple mysql datetimes",
+			input: `{"a": "2026-01-01 00:00:00", "b": "2026-12-31 23:59:59"}`,
+			want:  `{"a": "2026-01-01T00:00:00Z", "b": "2026-12-31T23:59:59Z"}`,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := repairMySQLTimestamps([]byte(tt.input))
+			if tt.isNil {
+				if got != nil {
+					t.Errorf("got %q, want nil", got)
+				}
+				return
+			}
+			if string(got) != tt.want {
+				t.Errorf("got %q, want %q", got, tt.want)
+			}
+		})
 	}
 }
