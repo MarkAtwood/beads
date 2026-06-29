@@ -4,25 +4,18 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-**beads** (command: `bd`) is a Dolt-powered issue tracker for AI-supervised coding workflows. Git integration is optional — see `BEADS_DIR` + `--stealth` for git-free operation. We dogfood our own tool.
+**beads** (command: `bd`) is an issue tracker for AI-supervised coding workflows. Git integration is optional — see `BEADS_DIR` + `--stealth` for git-free operation. We dogfood our own tool.
 
 **IMPORTANT**: See [AGENTS.md](../AGENTS.md) for complete workflow instructions, bd commands, and development guidelines.
 
 ## Architecture Overview
 
-### Three-Layer Design
+### Two-Layer Design
 
 1. **Storage Layer** (`internal/storage/`)
-   - **Dolt** in `storage/dolt/` — version-controlled SQL database with cell-level merge
    - Common types and interfaces in `storage.go`
 
-2. **Database Runtime Layer**
-   - Embedded mode runs Dolt in-process through `internal/storage/embeddeddolt/`
-   - Server mode uses `internal/doltserver/` and `internal/storage/db/`
-   - Proxy and pidfile helpers live under `internal/storage/db/`
-   - Storage-facing server adapters live under `internal/storage/doltserver/`
-
-3. **CLI Layer** (`cmd/bd/`)
+2. **CLI Layer** (`cmd/bd/`)
    - Cobra-based commands (one file per command: `create.go`, `list.go`, etc.)
    - Direct database access (embedded mode for standalone, server mode for orchestrator)
    - All commands support `--json` for programmatic use
@@ -30,25 +23,10 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ### Storage Architecture
 
-Beads uses **Dolt** as its storage backend — a version-controlled SQL database:
-
-```
-Dolt DB (.beads/dolt/)
-    ↕ Dolt commits (automatic per write)
-    ↕ Dolt push/pull (native sync)
-Remote (Dolt remotes: DoltHub, S3, GCS, etc.)
-```
-
-- **Write path**: CLI → Dolt → auto-commit to Dolt history
-- **Read path**: Direct SQL queries against Dolt
-- **Sync**: Dolt handles versioning and sync natively via `bd dolt push` / `bd dolt pull`
 - **Hash-based IDs**: Automatic collision prevention (v0.20+)
 
 Core implementation:
-- Dolt storage: `internal/storage/dolt/`
-- Embedded runtime: `internal/storage/embeddeddolt/`
-- Server runtime: `internal/doltserver/`, `internal/storage/db/`, and `internal/storage/doltserver/`
-- Sync commands: `cmd/bd/dolt_*.go`, `cmd/bd/sync_*.go`
+- Sync commands: `cmd/bd/sync_*.go`
 
 ### Key Data Types
 

@@ -15,8 +15,6 @@ rules here; those details drift quickly when repeated across agent entrypoints.
 - Run `bd prime` before doing tracked work.
 - Follow `go.mod` and [AGENT_INSTRUCTIONS.md](AGENT_INSTRUCTIONS.md) for build
   and test commands; do not hard-code toolchain versions here.
-- Beads uses Dolt as the issue database. Use `bd dolt push` / `bd dolt pull`
-  for issue data sync; do not use export/import as a routine git workflow.
 - The CLI Visual Design System lives in
   [AGENT_INSTRUCTIONS.md](AGENT_INSTRUCTIONS.md#visual-design-system).
 - If this file conflicts with a linked source, trust the linked source and fix

@@ -60,7 +60,7 @@ See [AGENT_INSTRUCTIONS.md](AGENT_INSTRUCTIONS.md) for full development guidelin
 
 The canonical storage boundary is in
 [docs/PROJECT_CHARTER.md](docs/PROJECT_CHARTER.md#storage-boundary). In short:
-Beads talks to storage through a driver interface (`dolthub/driver` for Dolt).
+Beads talks to storage through a driver interface.
 Do not add beads-side flocks, engine introspection, storage-specific retry or
 crash-recovery logic, or public SDK return types that leak driver internals.
 If the boundary is too narrow, widen the interface or route the issue to the
@@ -151,7 +151,7 @@ cp -rf source dest          # NOT: cp -r source dest
 ### Why bd?
 
 - Dependency-aware: Track blockers and relationships between issues
-- Git-friendly: Dolt-powered version control with native sync
+- Git-friendly: version-controlled issue tracking
 - Agent-optimized: JSON output, ready work detection, discovered-from links
 - Prevents duplicate tracking systems and confusion
 
@@ -215,14 +215,6 @@ bd close bd-42 --reason "Completed" --json
 5. **Discover new work?** Create linked issue:
    - `bd create "Found bug" --description="Details about what was found" -p 1 --deps discovered-from:<parent-id>`
 6. **Complete**: `bd close <id> --reason "Done"`
-
-### Auto-Sync
-
-bd automatically syncs via Dolt:
-
-- Each write auto-commits to Dolt history
-- Use `bd dolt push`/`bd dolt pull` for remote sync
-- No manual export/import needed!
 
 ### Important Rules
 
