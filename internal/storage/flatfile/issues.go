@@ -71,6 +71,14 @@ func (s *FlatFileStore) readIssue(id string) (*types.Issue, error) {
 				return &issue, nil
 			}
 		}
+		// Attempt to repair type mismatches from raw SQL exports: integer
+		// booleans (Dolt TINYINT 0/1), object dependency metadata (should
+		// be string), and unknown column names (timeout_ns, content_hash).
+		if repaired := repairIssueTypes(data); repaired != nil {
+			if err2 := json.Unmarshal(repaired, &issue); err2 == nil {
+				return &issue, nil
+			}
+		}
 		return nil, fmt.Errorf("flatfile: unmarshal issue %s: %w", id, err)
 	}
 	return &issue, nil
@@ -86,6 +94,74 @@ func repairMySQLTimestamps(data []byte) []byte {
 		return nil
 	}
 	return mysqlDatetimeRe.ReplaceAll(data, []byte(`"${1}T${2}Z"`))
+}
+
+// repairIssueTypes fixes type mismatches from raw Dolt SQL exports:
+//   - Integer booleans (0/1) → proper JSON booleans for known bool fields
+//   - Dependency metadata as object → JSON string
+//   - Unknown SQL column names (timeout_ns → timeout, content_hash → ignored)
+//
+// Returns nil if no repairs were possible.
+func repairIssueTypes(data []byte) []byte {
+	var raw map[string]interface{}
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return nil
+	}
+
+	changed := false
+
+	// Coerce known boolean fields from number to bool.
+	for _, field := range []string{"ephemeral", "is_template", "is_blocked", "no_history", "pinned"} {
+		if v, ok := raw[field]; ok {
+			if n, isNum := v.(float64); isNum {
+				raw[field] = n != 0
+				changed = true
+			}
+		}
+	}
+
+	// Map Dolt SQL column names to Go JSON tag names.
+	if v, ok := raw["timeout_ns"]; ok {
+		if _, exists := raw["timeout"]; !exists {
+			raw["timeout"] = v
+		}
+		delete(raw, "timeout_ns")
+		changed = true
+	}
+	// content_hash is json:"-" in the Go struct; just drop it.
+	if _, ok := raw["content_hash"]; ok {
+		delete(raw, "content_hash")
+		changed = true
+	}
+
+	// Coerce dependency metadata from object/number to string.
+	if deps, ok := raw["dependencies"].([]interface{}); ok {
+		for _, dep := range deps {
+			depMap, ok := dep.(map[string]interface{})
+			if !ok {
+				continue
+			}
+			if meta, ok := depMap["metadata"]; ok {
+				if _, isStr := meta.(string); !isStr {
+					b, err := json.Marshal(meta)
+					if err == nil {
+						depMap["metadata"] = string(b)
+						changed = true
+					}
+				}
+			}
+		}
+	}
+
+	if !changed {
+		return nil
+	}
+
+	repaired, err := json.Marshal(raw)
+	if err != nil {
+		return nil
+	}
+	return repaired
 }
 
 // writeIssue marshals and writes an issue to disk atomically.
@@ -112,6 +188,8 @@ func (s *FlatFileStore) writeIssue(issue *types.Issue) error {
 }
 
 // loadAllIssues reads and unmarshals every issue file in the issues directory.
+// Individual files that fail to parse are skipped with a warning to stderr
+// so that one corrupt file does not block the entire workspace.
 func (s *FlatFileStore) loadAllIssues() ([]*types.Issue, error) {
 	entries, err := os.ReadDir(s.issuesDir)
 	if err != nil {
@@ -130,7 +208,8 @@ func (s *FlatFileStore) loadAllIssues() ([]*types.Issue, error) {
 		id := strings.TrimSuffix(name, ".json")
 		issue, err := s.readIssue(id)
 		if err != nil {
-			return nil, err
+			fmt.Fprintf(os.Stderr, "warning: skipping corrupt issue %s: %v\n", id, err)
+			continue
 		}
 		issues = append(issues, issue)
 	}

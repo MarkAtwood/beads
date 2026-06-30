@@ -2,6 +2,7 @@ package flatfile
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
 	"strings"
@@ -424,5 +425,161 @@ func TestRepairMySQLTimestamps(t *testing.T) {
 				t.Errorf("got %q, want %q", got, tt.want)
 			}
 		})
+	}
+}
+
+func TestRepairIssueTypes(t *testing.T) {
+	t.Run("no changes needed", func(t *testing.T) {
+		input := `{"id":"x","ephemeral":false,"pinned":true}`
+		got := repairIssueTypes([]byte(input))
+		if got != nil {
+			t.Errorf("expected nil for correct JSON, got %q", got)
+		}
+	})
+
+	t.Run("integer booleans", func(t *testing.T) {
+		input := `{"id":"x","ephemeral":0,"is_template":1,"pinned":0,"no_history":0}`
+		got := repairIssueTypes([]byte(input))
+		if got == nil {
+			t.Fatal("expected repaired JSON, got nil")
+		}
+		var m map[string]interface{}
+		if err := json.Unmarshal(got, &m); err != nil {
+			t.Fatalf("unmarshal repaired: %v", err)
+		}
+		if m["ephemeral"] != false {
+			t.Errorf("ephemeral = %v, want false", m["ephemeral"])
+		}
+		if m["is_template"] != true {
+			t.Errorf("is_template = %v, want true", m["is_template"])
+		}
+	})
+
+	t.Run("dependency metadata object to string", func(t *testing.T) {
+		input := `{"id":"x","dependencies":[{"issue_id":"a","depends_on_id":"b","type":"blocks","metadata":{},"created_at":"2026-01-01T00:00:00Z"}]}`
+		got := repairIssueTypes([]byte(input))
+		if got == nil {
+			t.Fatal("expected repaired JSON, got nil")
+		}
+		var issue types.Issue
+		if err := json.Unmarshal(got, &issue); err != nil {
+			t.Fatalf("unmarshal into Issue: %v", err)
+		}
+		if len(issue.Dependencies) != 1 {
+			t.Fatalf("got %d deps, want 1", len(issue.Dependencies))
+		}
+		if issue.Dependencies[0].Metadata != "{}" {
+			t.Errorf("metadata = %q, want %q", issue.Dependencies[0].Metadata, "{}")
+		}
+	})
+
+	t.Run("timeout_ns renamed to timeout", func(t *testing.T) {
+		input := `{"id":"x","timeout_ns":5000000000}`
+		got := repairIssueTypes([]byte(input))
+		if got == nil {
+			t.Fatal("expected repaired JSON, got nil")
+		}
+		var m map[string]interface{}
+		if err := json.Unmarshal(got, &m); err != nil {
+			t.Fatalf("unmarshal repaired: %v", err)
+		}
+		if _, ok := m["timeout_ns"]; ok {
+			t.Error("timeout_ns should have been removed")
+		}
+		if m["timeout"] != 5000000000.0 {
+			t.Errorf("timeout = %v, want 5000000000", m["timeout"])
+		}
+	})
+
+	t.Run("content_hash removed", func(t *testing.T) {
+		input := `{"id":"x","content_hash":"abc123"}`
+		got := repairIssueTypes([]byte(input))
+		if got == nil {
+			t.Fatal("expected repaired JSON, got nil")
+		}
+		var m map[string]interface{}
+		if err := json.Unmarshal(got, &m); err != nil {
+			t.Fatalf("unmarshal repaired: %v", err)
+		}
+		if _, ok := m["content_hash"]; ok {
+			t.Error("content_hash should have been removed")
+		}
+	})
+}
+
+func TestReadIssueIntegerBooleans(t *testing.T) {
+	s := newTestStore(t)
+
+	// Simulate a raw Dolt SQL export with integer booleans and object metadata.
+	issueJSON := `{
+  "id": "corrupt-1",
+  "title": "Integer booleans",
+  "status": "open",
+  "priority": 2,
+  "ephemeral": 0,
+  "is_template": 0,
+  "no_history": 0,
+  "pinned": 0,
+  "timeout_ns": 0,
+  "content_hash": "abc123",
+  "created_at": "2026-06-22T21:02:52Z",
+  "updated_at": "2026-06-22T21:02:52Z",
+  "metadata": {},
+  "dependencies": [
+    {
+      "issue_id": "corrupt-1",
+      "depends_on_id": "corrupt-2",
+      "type": "relates-to",
+      "created_at": "2026-06-22T21:02:52Z",
+      "metadata": {}
+    }
+  ]
+}
+`
+	os.WriteFile(s.issueFilename("corrupt-1"), []byte(issueJSON), 0o644)
+
+	got, err := s.readIssue("corrupt-1")
+	if err != nil {
+		t.Fatalf("readIssue with integer booleans: %v", err)
+	}
+	if got.Ephemeral {
+		t.Error("ephemeral should be false")
+	}
+	if got.IsTemplate {
+		t.Error("is_template should be false")
+	}
+	if len(got.Dependencies) != 1 {
+		t.Fatalf("got %d dependencies, want 1", len(got.Dependencies))
+	}
+	if got.Dependencies[0].Metadata != "{}" {
+		t.Errorf("dep metadata = %q, want %q", got.Dependencies[0].Metadata, "{}")
+	}
+}
+
+func TestLoadAllIssuesSkipsCorrupt(t *testing.T) {
+	s := newTestStore(t)
+
+	// Write a valid issue.
+	good := &types.Issue{
+		ID:       "good-1",
+		Title:    "Good issue",
+		Priority: 1,
+	}
+	if err := s.CreateIssue(ctx, good, "tester"); err != nil {
+		t.Fatalf("CreateIssue: %v", err)
+	}
+
+	// Write a completely unparseable file.
+	os.WriteFile(s.issueFilename("bad-1"), []byte(`{not json at all`), 0o644)
+
+	issues, err := s.loadAllIssues()
+	if err != nil {
+		t.Fatalf("loadAllIssues should not fail on corrupt file: %v", err)
+	}
+	if len(issues) != 1 {
+		t.Errorf("got %d issues, want 1 (corrupt file should be skipped)", len(issues))
+	}
+	if issues[0].ID != "good-1" {
+		t.Errorf("got ID %q, want %q", issues[0].ID, "good-1")
 	}
 }
