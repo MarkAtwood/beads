@@ -6,6 +6,11 @@ sidebar_position: 1
 
 # Installing bd
 
+<!-- This website install page and the GitHub-rendered docs/INSTALLING.md are
+     deliberate parallel docs for different audiences. When you change platform
+     commands or install methods here, update docs/INSTALLING.md too so they do
+     not drift. -->
+
 Complete installation guide for all platforms.
 
 ## Quick Install (Recommended)
@@ -15,6 +20,11 @@ Complete installation guide for all platforms.
 ```bash
 brew install beads
 ```
+
+Homebrew core's `beads` formula is the supported Homebrew package. If you
+previously installed the old tap formula as `bd`, see
+[Migrating from the old Homebrew tap](/getting-started/upgrading#homebrew) to
+switch to the core formula.
 
 **Why Homebrew?**
 - Simple one-command install
@@ -44,6 +54,8 @@ Use Homebrew, npm, or the install script if you do not specifically need `go ins
 - **Embedded-capable:** `CGO_ENABLED=1 GOFLAGS=-tags=gms_pure_go go install github.com/steveyegge/beads/cmd/bd@latest`
 
 ICU headers are not required. The embedded-capable command uses `gms_pure_go` so go-mysql-server uses Go's stdlib regexp instead of ICU.
+
+Use the `github.com/steveyegge/beads` path for `go install`. The repository now lives under `gastownhall/beads`, but released Go modules still declare `github.com/steveyegge/beads` for compatibility.
 
 ## Platform-Specific Installation
 
@@ -158,7 +170,7 @@ bd setup mux      # Mux - creates/updates AGENTS.md
 ```
 
 **How it works:**
-- `bd init` creates or updates `AGENTS.md` by default unless you use `--skip-agents` or `--stealth`
+- `bd init` creates or updates `AGENTS.md` and installs project Claude/Codex integrations by default unless you use `--skip-agents` or `--stealth`
 - Editor hooks/rules inject `bd prime` automatically on session start
 - Codex 0.129.0+ uses native `/hooks` for startup and compaction-aware context refresh
 - `bd prime` provides ~1-2k tokens of workflow context
