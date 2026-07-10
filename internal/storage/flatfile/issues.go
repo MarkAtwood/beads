@@ -359,10 +359,20 @@ func (s *FlatFileStore) ReopenIssue(_ context.Context, id string, reason string,
 	return s.writeIssue(issue)
 }
 
-// UpdateIssueType changes the issue_type field.
-func (s *FlatFileStore) UpdateIssueType(_ context.Context, id string, issueType string, _ string) error {
+// UpdateIssueType changes the issue_type field after validating the type
+// against built-in and configured custom types, mirroring the validation
+// the SQL backends run inside UpdateIssueInTx via ResolveCustomTypesInTx.
+func (s *FlatFileStore) UpdateIssueType(ctx context.Context, id string, issueType string, _ string) error {
 	if err := s.checkClosed(); err != nil {
 		return err
+	}
+
+	custom, err := s.GetCustomTypes(ctx)
+	if err != nil {
+		return err
+	}
+	if !types.IssueType(issueType).IsValidWithCustom(custom) {
+		return fmt.Errorf("flatfile: invalid issue type %q", issueType)
 	}
 
 	issue, err := s.readIssue(id)

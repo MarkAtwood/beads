@@ -12,6 +12,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -954,16 +955,45 @@ func (s *FlatFileStore) DeleteConfig(_ context.Context, key string) error {
 	return s.writeKVFile(s.configKVPath, kv)
 }
 
-func (s *FlatFileStore) GetCustomStatuses(_ context.Context) ([]string, error) {
-	return nil, nil
+// GetCustomStatuses returns configured custom status names sorted by name,
+// read from the normalized store (ORDER BY name parity with SQL backends).
+func (s *FlatFileStore) GetCustomStatuses(ctx context.Context) ([]string, error) {
+	detailed, err := s.GetCustomStatusesDetailed(ctx)
+	if err != nil {
+		return nil, err
+	}
+	names := make([]string, len(detailed))
+	for i, cs := range detailed {
+		names[i] = cs.Name
+	}
+	return names, nil
 }
 
+// GetCustomStatusesDetailed returns configured custom statuses with their
+// categories, sorted by name.
 func (s *FlatFileStore) GetCustomStatusesDetailed(_ context.Context) ([]types.CustomStatus, error) {
-	return nil, nil
+	if err := s.checkClosed(); err != nil {
+		return nil, err
+	}
+	list, err := s.readCustomStatuses()
+	if err != nil {
+		return nil, err
+	}
+	sort.Slice(list, func(i, j int) bool { return list[i].Name < list[j].Name })
+	return list, nil
 }
 
+// GetCustomTypes returns configured custom type names sorted by name.
 func (s *FlatFileStore) GetCustomTypes(_ context.Context) ([]string, error) {
-	return nil, nil
+	if err := s.checkClosed(); err != nil {
+		return nil, err
+	}
+	list, err := s.readCustomTypes()
+	if err != nil {
+		return nil, err
+	}
+	sort.Strings(list)
+	return list, nil
 }
 
 var infraTypes = map[string]bool{

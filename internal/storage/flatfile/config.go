@@ -7,12 +7,29 @@ import (
 	"fmt"
 	"io/fs"
 	"os"
+	"strings"
+
+	"github.com/steveyegge/beads/internal/types"
 )
 
-// SetConfig sets a key-value pair in the config store.
+// SetConfig sets a key-value pair in the config store. status.custom and
+// types.custom are validated and synced to the normalized custom-status/
+// custom-type files first, mirroring the SQL backends' SetConfig →
+// SyncCustomStatusesTable/SyncCustomTypesTable write tx: an invalid value
+// returns an error and nothing is stored.
 func (s *FlatFileStore) SetConfig(_ context.Context, key, value string) error {
 	if err := s.checkClosed(); err != nil {
 		return err
+	}
+	switch key {
+	case "status.custom":
+		if err := s.syncCustomStatuses(value); err != nil {
+			return err
+		}
+	case "types.custom":
+		if err := s.syncCustomTypes(value); err != nil {
+			return err
+		}
 	}
 	return s.setKV(s.configKVPath, key, value)
 }
@@ -107,4 +124,99 @@ func (s *FlatFileStore) getKV(path, key string) (string, error) {
 		return "", err
 	}
 	return kv[key], nil
+}
+
+// syncCustomStatuses replaces the normalized custom-status file with the
+// parsed config value. Mirrors issueops.SyncCustomStatusesTable: parsing
+// validates status names and categories.
+func (s *FlatFileStore) syncCustomStatuses(value string) error {
+	var parsed []types.CustomStatus
+	if value != "" {
+		var err error
+		parsed, err = types.ParseCustomStatusConfig(value)
+		if err != nil {
+			return fmt.Errorf("invalid status.custom value: %w", err)
+		}
+	}
+	return writeJSONFile(s.customStatusesPath, parsed)
+}
+
+// syncCustomTypes replaces the normalized custom-type file with the parsed
+// config value. Mirrors issueops.SyncCustomTypesTable.
+func (s *FlatFileStore) syncCustomTypes(value string) error {
+	return writeJSONFile(s.customTypesPath, parseTypesValue(value))
+}
+
+// parseTypesValue accepts a JSON string array or a comma-separated list,
+// mirroring issueops.parseTypesValue.
+func parseTypesValue(value string) []string {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return nil
+	}
+	var jsonTypes []string
+	if err := json.Unmarshal([]byte(value), &jsonTypes); err == nil {
+		return jsonTypes
+	}
+	var out []string
+	for _, part := range strings.Split(value, ",") {
+		if part = strings.TrimSpace(part); part != "" {
+			out = append(out, part)
+		}
+	}
+	return out
+}
+
+// readCustomStatuses reads the normalized custom-status file. A missing
+// file means no custom statuses are configured.
+func (s *FlatFileStore) readCustomStatuses() ([]types.CustomStatus, error) {
+	var out []types.CustomStatus
+	if err := readJSONFile(s.customStatusesPath, &out); err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+// readCustomTypes reads the normalized custom-type file. A missing file
+// means no custom types are configured.
+func (s *FlatFileStore) readCustomTypes() ([]string, error) {
+	var out []string
+	if err := readJSONFile(s.customTypesPath, &out); err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+// writeJSONFile writes v as indented JSON atomically (write-then-rename).
+func writeJSONFile(path string, v interface{}) error {
+	data, err := json.MarshalIndent(v, "", "  ")
+	if err != nil {
+		return fmt.Errorf("flatfile: marshal %s: %w", path, err)
+	}
+	data = append(data, '\n')
+
+	tmp := path + ".tmp"
+	if err := os.WriteFile(tmp, data, 0o644); err != nil {
+		return fmt.Errorf("flatfile: write %s: %w", path, err)
+	}
+	if err := os.Rename(tmp, path); err != nil {
+		_ = os.Remove(tmp)
+		return fmt.Errorf("flatfile: rename %s: %w", path, err)
+	}
+	return nil
+}
+
+// readJSONFile unmarshals path into v; a missing file leaves v untouched.
+func readJSONFile(path string, v interface{}) error {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			return nil
+		}
+		return fmt.Errorf("flatfile: read %s: %w", path, err)
+	}
+	if err := json.Unmarshal(data, v); err != nil {
+		return fmt.Errorf("flatfile: parse %s: %w", path, err)
+	}
+	return nil
 }

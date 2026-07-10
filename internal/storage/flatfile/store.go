@@ -27,6 +27,12 @@ type FlatFileStore struct {
 	mergeslotPath string // .beads/merge_slot.json
 	repoMtimePath string // .beads/repo_mtime.json
 
+	// Normalized custom-status/type stores, the flat-file analog of the
+	// custom_statuses/custom_types tables. Synced by SetConfig and — like
+	// the SQL tables — deliberately left untouched by DeleteConfig.
+	customStatusesPath string // .beads/custom_statuses.json
+	customTypesPath    string // .beads/custom_types.json
+
 	mu        sync.RWMutex // protects counter file
 	kvMu      sync.Mutex   // protects config/metadata KV read-modify-write
 	commentSeq atomic.Int64 // monotonic counter for comment IDs
@@ -53,6 +59,9 @@ func NewFlatFileStore(beadsDir string) (*FlatFileStore, error) {
 		localMetaPath: filepath.Join(abs, "local_metadata.json"),
 		mergeslotPath: filepath.Join(abs, "merge_slot.json"),
 		repoMtimePath: filepath.Join(abs, "repo_mtime.json"),
+
+		customStatusesPath: filepath.Join(abs, "custom_statuses.json"),
+		customTypesPath:    filepath.Join(abs, "custom_types.json"),
 	}
 
 	dirs := []string{s.issuesDir, s.commentsDir, s.memoriesDir, s.eventsDir}
