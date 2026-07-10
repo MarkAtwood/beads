@@ -826,27 +826,69 @@ func (s *FlatFileStore) ImportIssueComment(_ context.Context, issueID, author, t
 		Text:      text,
 		CreatedAt: createdAt,
 	}
-	dir, err := safePath(s.commentsDir, issueID, "")
-	if err != nil {
+	if err := s.writeCommentFile(comment); err != nil {
 		return nil, err
 	}
+	return comment, nil
+}
+
+// ImportComment writes a fully-specified comment, preserving its ID. Used by
+// the flat-file migration so comment identity survives a Dolt→flatfile→Dolt
+// round trip (ImportIssueComment mints a new ID, which is lossy). Not part of
+// storage.DoltStorage; callers hold the concrete *FlatFileStore.
+func (s *FlatFileStore) ImportComment(_ context.Context, comment *types.Comment) error {
+	if err := s.checkClosed(); err != nil {
+		return err
+	}
+	if comment.ID == "" {
+		comment.ID = fmt.Sprintf("%d", comment.CreatedAt.UnixNano())
+	}
+	return s.writeCommentFile(comment)
+}
+
+// writeCommentFile persists one comment as comments/{issueID}/{createdAt}-{id}.json.
+// The sanitized comment ID in the filename keeps two comments with the same
+// created_at (common after a Dolt export, where DATETIME is second-granular)
+// from overwriting each other's file.
+func (s *FlatFileStore) writeCommentFile(comment *types.Comment) error {
+	dir, err := safePath(s.commentsDir, comment.IssueID, "")
+	if err != nil {
+		return err
+	}
 	_ = os.MkdirAll(dir, 0o755)
-	filename := createdAt.Format("2006-01-02T15-04-05.000000000Z") + ".json"
+	filename := comment.CreatedAt.Format("2006-01-02T15-04-05.000000000Z") + "-" + sanitizeFilenameComponent(comment.ID) + ".json"
 	data, err := json.MarshalIndent(comment, "", "  ")
 	if err != nil {
-		return nil, fmt.Errorf("flatfile: marshal comment: %w", err)
+		return fmt.Errorf("flatfile: marshal comment: %w", err)
 	}
 	data = append(data, '\n')
 	path := filepath.Join(dir, filename)
 	tmp := path + ".tmp"
 	if err := os.WriteFile(tmp, data, 0o644); err != nil {
-		return nil, fmt.Errorf("flatfile: write comment: %w", err)
+		return fmt.Errorf("flatfile: write comment: %w", err)
 	}
 	if err := os.Rename(tmp, path); err != nil {
 		_ = os.Remove(tmp)
-		return nil, fmt.Errorf("flatfile: rename comment: %w", err)
+		return fmt.Errorf("flatfile: rename comment: %w", err)
 	}
-	return comment, nil
+	return nil
+}
+
+// sanitizeFilenameComponent reduces an ID to filesystem-safe characters,
+// capped at 64 bytes. Comment IDs are UUIDs or UnixNano strings, which pass
+// through unchanged; anything else degrades to '-' rather than erroring.
+func sanitizeFilenameComponent(id string) string {
+	out := make([]byte, 0, len(id))
+	for i := 0; i < len(id) && len(out) < 64; i++ {
+		c := id[i]
+		switch {
+		case c >= 'a' && c <= 'z', c >= 'A' && c <= 'Z', c >= '0' && c <= '9', c == '-', c == '_':
+			out = append(out, c)
+		default:
+			out = append(out, '-')
+		}
+	}
+	return string(out)
 }
 
 func (s *FlatFileStore) GetCommentCounts(_ context.Context, issueIDs []string) (map[string]int, error) {
