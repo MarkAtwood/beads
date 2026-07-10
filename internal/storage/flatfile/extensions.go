@@ -193,10 +193,6 @@ func (s *FlatFileStore) SlotClear(_ context.Context, issueID, key, _ string) err
 
 // ── BulkIssueStore ───────────────────────────────────────────────────
 
-func (s *FlatFileStore) CreateIssuesWithFullOptions(ctx context.Context, issues []*types.Issue, actor string, _ storage.BatchCreateOptions) error {
-	return s.CreateIssues(ctx, issues, actor)
-}
-
 func (s *FlatFileStore) DeleteIssues(ctx context.Context, ids []string, _ bool, _ bool, dryRun bool) (*types.DeleteIssuesResult, error) {
 	if err := s.checkClosed(); err != nil {
 		return nil, err
@@ -1075,15 +1071,9 @@ func (s *FlatFileStore) GetMoleculeProgress(_ context.Context, moleculeID string
 				stats.Total++
 				switch issue.Status { //nolint:exhaustive // only closed/in-progress affect molecule progress
 				case types.StatusClosed:
+					// FirstClosed/LastClosed stay nil: the SQL reference never
+					// populates them, and the conformance suite pins that.
 					stats.Completed++
-					if issue.ClosedAt != nil {
-						if stats.FirstClosed == nil || issue.ClosedAt.Before(*stats.FirstClosed) {
-							stats.FirstClosed = issue.ClosedAt
-						}
-						if stats.LastClosed == nil || issue.ClosedAt.After(*stats.LastClosed) {
-							stats.LastClosed = issue.ClosedAt
-						}
-					}
 				case types.StatusInProgress:
 					stats.InProgress++
 					if stats.CurrentStepID == "" {
