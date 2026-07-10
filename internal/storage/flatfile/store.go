@@ -15,7 +15,12 @@ import (
 
 // FlatFileStore implements the storage.Storage interface using one JSON file
 // per issue. It also satisfies storage.StoreLocator and storage.LifecycleManager.
+// The embedded unsupportedDoltStorage shell answers the few methods the backend
+// deliberately omits (FederationStore) with typed *storage.ErrUnsupported;
+// every method implemented on *FlatFileStore shadows it.
 type FlatFileStore struct {
+	unsupportedDoltStorage
+
 	beadsDir      string // root .beads/ directory
 	issuesDir     string // .beads/issues/
 	commentsDir   string // .beads/comments/
@@ -33,8 +38,8 @@ type FlatFileStore struct {
 	customStatusesPath string // .beads/custom_statuses.json
 	customTypesPath    string // .beads/custom_types.json
 
-	mu        sync.RWMutex // protects counter file
-	kvMu      sync.Mutex   // protects config/metadata KV read-modify-write
+	mu         sync.RWMutex // protects counter file
+	kvMu       sync.Mutex   // protects config/metadata KV read-modify-write
 	commentSeq atomic.Int64 // monotonic counter for comment IDs
 
 	closed atomic.Bool
