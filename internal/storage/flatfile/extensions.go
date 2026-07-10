@@ -464,13 +464,22 @@ func (s *FlatFileStore) ReclaimExpiredLeases(_ context.Context, olderThan time.D
 	return reclaimed, nil
 }
 
+// PromoteFromEphemeral promotes a wisp to a durable issue. Only an actual
+// wisp can be promoted (missing IDs and durable issues error, so a second
+// promote fails), mirroring issueops.PromoteFromEphemeralInTx. Labels,
+// comments, events, and dependencies live in the same unified stores for
+// wisps and durable issues, so the SQL backends' aux-table migration is a
+// structural no-op here.
 func (s *FlatFileStore) PromoteFromEphemeral(_ context.Context, id string, _ string) error {
 	if err := s.checkClosed(); err != nil {
 		return err
 	}
 	issue, err := s.readIssue(id)
 	if err != nil {
-		return err
+		return fmt.Errorf("flatfile: wisp %s not found: %w", id, err)
+	}
+	if !issue.Ephemeral {
+		return fmt.Errorf("flatfile: wisp %s not found: not ephemeral", id)
 	}
 	issue.Ephemeral = false
 	issue.UpdatedAt = time.Now().UTC()
@@ -1094,28 +1103,71 @@ func (s *FlatFileStore) GetMoleculeProgress(_ context.Context, moleculeID string
 	return stats, nil
 }
 
+// GetMoleculeLastActivity mirrors issueops.GetMoleculeLastActivityInTx:
+// a missing molecule is an error; a childless molecule reports its own
+// updated_at as molecule_updated; otherwise the max child updated_at wins
+// as step_updated, upgraded to step_closed only when the max child
+// closed_at is STRICTLY after it. Children are scanned in the molecule's
+// own bucket (wisp vs durable), matching the SQL WispTableRouting.
 func (s *FlatFileStore) GetMoleculeLastActivity(_ context.Context, moleculeID string) (*types.MoleculeLastActivity, error) {
 	if err := s.checkClosed(); err != nil {
 		return nil, err
+	}
+	mol, err := s.readIssue(moleculeID)
+	if err != nil {
+		return nil, fmt.Errorf("flatfile: molecule %s not found: %w", moleculeID, err)
 	}
 	all, err := s.loadAllIssues()
 	if err != nil {
 		return nil, err
 	}
-	result := &types.MoleculeLastActivity{MoleculeID: moleculeID}
-	var latest time.Time
+
+	var lastUpdated time.Time
+	var lastUpdatedID string
+	var lastClosed *time.Time
+	var lastClosedID string
 	for _, issue := range all {
+		if issue.Ephemeral != mol.Ephemeral {
+			continue // other bucket, invisible to the routed SQL scan
+		}
+		isChild := false
 		for _, dep := range issue.Dependencies {
 			if dep.Type == types.DepParentChild && dep.DependsOnID == moleculeID {
-				if issue.UpdatedAt.After(latest) {
-					latest = issue.UpdatedAt
-					result.LastActivity = latest
-					result.Source = "step_updated"
-					result.SourceStepID = issue.ID
-				}
+				isChild = true
 				break
 			}
 		}
+		if !isChild {
+			continue
+		}
+		if lastUpdatedID == "" || issue.UpdatedAt.After(lastUpdated) {
+			lastUpdated = issue.UpdatedAt
+			lastUpdatedID = issue.ID
+		}
+		if issue.ClosedAt != nil && (lastClosed == nil || issue.ClosedAt.After(*lastClosed)) {
+			lastClosed = issue.ClosedAt
+			lastClosedID = issue.ID
+		}
+	}
+
+	if lastUpdatedID == "" {
+		return &types.MoleculeLastActivity{
+			MoleculeID:   moleculeID,
+			LastActivity: mol.UpdatedAt,
+			Source:       "molecule_updated",
+		}, nil
+	}
+
+	result := &types.MoleculeLastActivity{
+		MoleculeID:   moleculeID,
+		LastActivity: lastUpdated,
+		Source:       "step_updated",
+		SourceStepID: lastUpdatedID,
+	}
+	if lastClosed != nil && lastClosed.After(lastUpdated) {
+		result.LastActivity = *lastClosed
+		result.Source = "step_closed"
+		result.SourceStepID = lastClosedID
 	}
 	return result, nil
 }

@@ -35,8 +35,10 @@ func (s *FlatFileStore) AddDependency(_ context.Context, dep *types.Dependency, 
 		dep.CreatedAt = time.Now().UTC()
 	}
 
+	// The SQL reference preserves the source issue's updated_at when adding
+	// a dependency (issueops explicitly writes `updated_at = updated_at`),
+	// so no bump here.
 	issue.Dependencies = append(issue.Dependencies, dep)
-	issue.UpdatedAt = time.Now().UTC()
 
 	return s.writeIssue(issue)
 }
