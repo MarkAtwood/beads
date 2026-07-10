@@ -6,3 +6,4 @@ import "github.com/steveyegge/beads/internal/storage"
 var _ storage.DoltStorage = (*FlatFileStore)(nil)
 var _ storage.StoreLocator = (*FlatFileStore)(nil)
 var _ storage.LifecycleManager = (*FlatFileStore)(nil)
+var _ storage.ReadyWorkCounter = (*FlatFileStore)(nil)
