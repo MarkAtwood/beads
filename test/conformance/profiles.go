@@ -100,6 +100,13 @@ var Profiles = []BackendProfile{
 		// it; the temp workspace dir cleanup removes the file. No handle/env/teardown.
 		InitArgs: func(*Workspace) []string { return []string{"--backend=sqlite"} },
 	},
+	{
+		Name:      "flatfile",
+		Available: func() bool { return true }, // embedded (pure Go, one JSON file per issue); always runs
+		// File-based: the JSON files inside each workspace's .beads dir isolate it;
+		// the temp workspace dir cleanup removes them. No handle/env/teardown.
+		InitArgs: func(*Workspace) []string { return []string{"--backend=flatfile"} },
+	},
 }
 
 // Reference returns the single reference profile.
