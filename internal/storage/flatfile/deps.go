@@ -2,48 +2,218 @@ package flatfile
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/types"
 )
 
-// AddDependency adds a dependency record to the depending issue's JSON.
-func (s *FlatFileStore) AddDependency(_ context.Context, dep *types.Dependency, _ string) error {
+// isBlockingDepType reports whether a dependency type participates in
+// blocked-state and cycle detection (mirrors issueops' 'blocks' /
+// 'conditional-blocks' filters).
+func isBlockingDepType(t types.DependencyType) bool {
+	return t == types.DepBlocks || t == types.DepConditionalBlocks
+}
+
+// isExternalDepTarget reports whether a dependency target references another
+// rig ("external:..."), which skips existence validation.
+func isExternalDepTarget(id string) bool {
+	return strings.HasPrefix(id, "external:")
+}
+
+// blockingAdjacency builds the blocks/conditional-blocks adjacency map used
+// for cycle detection.
+func blockingAdjacency(all []*types.Issue) map[string][]string {
+	adj := make(map[string][]string)
+	for _, issue := range all {
+		for _, dep := range issue.Dependencies {
+			if isBlockingDepType(dep.Type) {
+				adj[issue.ID] = append(adj[issue.ID], dep.DependsOnID)
+			}
+		}
+	}
+	return adj
+}
+
+// reachable reports whether `to` is reachable from `from` in adj (BFS over
+// unique nodes, so diamonds and cycles terminate).
+func reachable(adj map[string][]string, from, to string) bool {
+	if from == to {
+		return true
+	}
+	seen := map[string]bool{from: true}
+	queue := []string{from}
+	for len(queue) > 0 {
+		node := queue[0]
+		queue = queue[1:]
+		for _, next := range adj[node] {
+			if next == to {
+				return true
+			}
+			if !seen[next] {
+				seen[next] = true
+				queue = append(queue, next)
+			}
+		}
+	}
+	return false
+}
+
+// checkDependencyCycle mirrors issueops.CheckDependencyCycleInTx: reject
+// self-dependencies for every type, and blocking-edge cycles by a
+// reachability probe from the target back to the source.
+func (s *FlatFileStore) checkDependencyCycle(dep *types.Dependency, all []*types.Issue) error {
+	if dep.IssueID == dep.DependsOnID {
+		return fmt.Errorf("cannot add self-dependency: %s cannot depend on itself", dep.IssueID)
+	}
+	if !isBlockingDepType(dep.Type) {
+		return nil
+	}
+	if reachable(blockingAdjacency(all), dep.DependsOnID, dep.IssueID) {
+		return fmt.Errorf("adding dependency would create a cycle")
+	}
+	return nil
+}
+
+// activeStatus mirrors the SQL blocked-state predicates: closed and pinned
+// issues neither block nor count as blocked.
+func activeStatus(st types.Status) bool {
+	return st != types.StatusClosed && st != types.StatusPinned
+}
+
+// computeBlockedSet mirrors the is_blocked projection maintained by
+// issueops.RecomputeIsBlockedInTx: an active issue is blocked when it has a
+// blocks/conditional-blocks edge to an existing active target, or (fixpoint)
+// a parent-child edge to a blocked parent.
+func computeBlockedSet(all []*types.Issue) map[string]bool {
+	statusOf := make(map[string]types.Status, len(all))
+	for _, issue := range all {
+		statusOf[issue.ID] = issue.Status
+	}
+	blocked := make(map[string]bool)
+	for _, issue := range all {
+		if !activeStatus(issue.Status) {
+			continue
+		}
+		for _, dep := range issue.Dependencies {
+			if !isBlockingDepType(dep.Type) {
+				continue
+			}
+			if st, ok := statusOf[dep.DependsOnID]; ok && activeStatus(st) {
+				blocked[issue.ID] = true
+				break
+			}
+		}
+	}
+	// Inherited parent blocking, iterated to a fixpoint.
+	for changed := true; changed; {
+		changed = false
+		for _, issue := range all {
+			if blocked[issue.ID] || !activeStatus(issue.Status) {
+				continue
+			}
+			for _, dep := range issue.Dependencies {
+				if dep.Type == types.DepParentChild && blocked[dep.DependsOnID] {
+					blocked[issue.ID] = true
+					changed = true
+					break
+				}
+			}
+		}
+	}
+	return blocked
+}
+
+// AddDependency validates and adds a dependency record to the depending
+// issue's JSON. Mirrors issueops.AddDependencyInTx: source/target existence,
+// cross-type blocking (GH#1495), self-dependency and cycle rejection,
+// idempotent same-type metadata updates, and type-conflict errors. External
+// ("external:...") targets skip existence validation. The source issue's
+// updated_at is deliberately NOT bumped (SQL never touches it here).
+func (s *FlatFileStore) AddDependency(_ context.Context, dep *types.Dependency, actor string) error {
 	if err := s.checkClosed(); err != nil {
 		return err
 	}
 
-	// Validate both issues exist.
-	issue, err := s.readIssue(dep.IssueID)
+	source, err := s.readIssue(dep.IssueID)
 	if err != nil {
-		return fmt.Errorf("flatfile: source issue: %w", err)
-	}
-	if _, err := s.readIssue(dep.DependsOnID); err != nil {
-		return fmt.Errorf("flatfile: target issue: %w", err)
+		if errors.Is(err, storage.ErrNotFound) {
+			return fmt.Errorf("issue %s not found", dep.IssueID)
+		}
+		return err
 	}
 
-	// Check for duplicate.
-	for _, existing := range issue.Dependencies {
-		if existing.DependsOnID == dep.DependsOnID && existing.Type == dep.Type {
-			return nil // idempotent
+	var target *types.Issue
+	if !isExternalDepTarget(dep.DependsOnID) {
+		target, err = s.readIssue(dep.DependsOnID)
+		if err != nil {
+			if errors.Is(err, storage.ErrNotFound) {
+				return fmt.Errorf("issue %s not found", dep.DependsOnID)
+			}
+			return err
 		}
 	}
 
+	// Cross-type blocking validation (GH#1495): tasks can only block tasks,
+	// epics can only block epics. Scoped to DepBlocks only.
+	if dep.Type == types.DepBlocks && target != nil {
+		sourceIsEpic := source.IssueType == types.TypeEpic
+		targetIsEpic := target.IssueType == types.TypeEpic
+		if sourceIsEpic != targetIsEpic {
+			if sourceIsEpic {
+				return fmt.Errorf("epics can only block other epics, not tasks")
+			}
+			return fmt.Errorf("tasks can only block other tasks, not epics")
+		}
+	}
+
+	all, err := s.loadAllIssues()
+	if err != nil {
+		return err
+	}
+	if err := s.checkDependencyCycle(dep, all); err != nil {
+		return err
+	}
+
+	metadata := dep.Metadata
+	if metadata == "" {
+		metadata = "{}"
+	}
+
+	// Existing edge between the same pair (any type): same type is an
+	// idempotent metadata update, a different type is a conflict.
+	for _, existing := range source.Dependencies {
+		if existing.DependsOnID != dep.DependsOnID {
+			continue
+		}
+		if existing.Type == dep.Type {
+			existing.Metadata = metadata
+			return s.writeIssue(source)
+		}
+		return fmt.Errorf("dependency %s -> %s already exists with type %q (requested %q); remove it first with 'bd dep remove' then re-add",
+			dep.IssueID, dep.DependsOnID, existing.Type, dep.Type)
+	}
+
+	dep.Metadata = metadata
 	if dep.CreatedAt.IsZero() {
 		dep.CreatedAt = time.Now().UTC()
 	}
-
+	if dep.CreatedBy == "" {
+		dep.CreatedBy = actor
+	}
 	// The SQL reference preserves the source issue's updated_at when adding
 	// a dependency (issueops explicitly writes `updated_at = updated_at`),
 	// so no bump here.
-	issue.Dependencies = append(issue.Dependencies, dep)
-
-	return s.writeIssue(issue)
+	source.Dependencies = append(source.Dependencies, dep)
+	return s.writeIssue(source)
 }
 
 // RemoveDependency removes a dependency from the depending issue's JSON.
+// Mirrors issueops.RemoveDependencyInTx: removing a non-existent edge is a
+// silent no-op, and edges of every type (including parent-child) match.
 func (s *FlatFileStore) RemoveDependency(_ context.Context, issueID, dependsOnID string, _ string) error {
 	if err := s.checkClosed(); err != nil {
 		return err
@@ -57,23 +227,23 @@ func (s *FlatFileStore) RemoveDependency(_ context.Context, issueID, dependsOnID
 	filtered := make([]*types.Dependency, 0, len(issue.Dependencies))
 	found := false
 	for _, dep := range issue.Dependencies {
-		if dep.DependsOnID == dependsOnID && dep.Type != types.DepParentChild {
+		if dep.DependsOnID == dependsOnID {
 			found = true
 			continue
 		}
 		filtered = append(filtered, dep)
 	}
 	if !found {
-		return storage.ErrNotFound
+		return nil
 	}
 
 	issue.Dependencies = filtered
-	issue.UpdatedAt = time.Now().UTC()
-
 	return s.writeIssue(issue)
 }
 
-// GetDependencies returns the issues that issueID depends on.
+// GetDependencies returns the issues that issueID depends on. Mirrors
+// issueops.GetDependenciesInTx: edges of every type are followed, and targets
+// that do not hydrate to an issue (missing, external) are dropped.
 func (s *FlatFileStore) GetDependencies(_ context.Context, issueID string) ([]*types.Issue, error) {
 	if err := s.checkClosed(); err != nil {
 		return nil, err
@@ -86,19 +256,17 @@ func (s *FlatFileStore) GetDependencies(_ context.Context, issueID string) ([]*t
 
 	var result []*types.Issue
 	for _, dep := range issue.Dependencies {
-		if dep.Type == types.DepParentChild {
-			continue
-		}
 		target, err := s.readIssue(dep.DependsOnID)
 		if err != nil {
-			continue // skip missing
+			continue // skip missing/external
 		}
 		result = append(result, target)
 	}
 	return result, nil
 }
 
-// GetDependents returns issues that depend on issueID (reverse lookup).
+// GetDependents returns issues that depend on issueID (reverse lookup, all
+// edge types — mirrors issueops.GetDependentsInTx).
 func (s *FlatFileStore) GetDependents(_ context.Context, issueID string) ([]*types.Issue, error) {
 	if err := s.checkClosed(); err != nil {
 		return nil, err
@@ -112,7 +280,7 @@ func (s *FlatFileStore) GetDependents(_ context.Context, issueID string) ([]*typ
 	var result []*types.Issue
 	for _, issue := range all {
 		for _, dep := range issue.Dependencies {
-			if dep.DependsOnID == issueID && dep.Type != types.DepParentChild {
+			if dep.DependsOnID == issueID {
 				result = append(result, issue)
 				break
 			}
@@ -172,7 +340,10 @@ func (s *FlatFileStore) GetDependentsWithMetadata(_ context.Context, issueID str
 	return result, nil
 }
 
-// GetDependencyTree builds a dependency tree starting from issueID.
+// GetDependencyTree builds a flattened dependency tree starting from issueID.
+// Mirrors issueops.GetDependencyTreeInTx: DFS pre-order, relates-to edges
+// excluded, nodes annotated with Depth/ParentID/EdgeFromParent, and traversal
+// stops when depth reaches maxDepth (maxDepth=1 yields just the root).
 func (s *FlatFileStore) GetDependencyTree(_ context.Context, issueID string, maxDepth int, _ bool, reverse bool) ([]*types.TreeNode, error) {
 	if err := s.checkClosed(); err != nil {
 		return nil, err
@@ -188,17 +359,20 @@ func (s *FlatFileStore) GetDependencyTree(_ context.Context, issueID string, max
 		issueMap[issue.ID] = issue
 	}
 
-	// Build adjacency: forward (deps) or reverse (dependents).
-	adj := make(map[string][]string)
+	type edge struct {
+		target  string
+		depType types.DependencyType
+	}
+	adj := make(map[string][]edge)
 	for _, issue := range all {
 		for _, dep := range issue.Dependencies {
-			if dep.Type == types.DepParentChild {
+			if dep.Type == types.DepRelatesTo {
 				continue
 			}
 			if reverse {
-				adj[dep.DependsOnID] = append(adj[dep.DependsOnID], issue.ID)
+				adj[dep.DependsOnID] = append(adj[dep.DependsOnID], edge{issue.ID, dep.Type})
 			} else {
-				adj[issue.ID] = append(adj[issue.ID], dep.DependsOnID)
+				adj[issue.ID] = append(adj[issue.ID], edge{dep.DependsOnID, dep.Type})
 			}
 		}
 	}
@@ -206,9 +380,9 @@ func (s *FlatFileStore) GetDependencyTree(_ context.Context, issueID string, max
 	var result []*types.TreeNode
 	visited := make(map[string]bool)
 
-	var walk func(id string, depth int)
-	walk = func(id string, depth int) {
-		if depth > maxDepth || visited[id] {
+	var walk func(id string, depth int, parentID string, edgeFromParent types.DependencyType)
+	walk = func(id string, depth int, parentID string, edgeFromParent types.DependencyType) {
+		if depth >= maxDepth || visited[id] {
 			return
 		}
 		visited[id] = true
@@ -218,22 +392,24 @@ func (s *FlatFileStore) GetDependencyTree(_ context.Context, issueID string, max
 			return
 		}
 
-		node := &types.TreeNode{
-			Issue: *issue,
-			Depth: depth,
-		}
-		result = append(result, node)
+		result = append(result, &types.TreeNode{
+			Issue:          *issue,
+			Depth:          depth,
+			ParentID:       parentID,
+			EdgeFromParent: edgeFromParent,
+		})
 
-		for _, next := range adj[id] {
-			walk(next, depth+1)
+		for _, e := range adj[id] {
+			walk(e.target, depth+1, id, e.depType)
 		}
 	}
 
-	walk(issueID, 0)
+	walk(issueID, 0, "", "")
 	return result, nil
 }
 
-// CountDependencies returns the number of non-parent-child dependencies.
+// CountDependencies returns the number of outbound dependency edges of every
+// type (mirrors the bare per-source COUNT in the SQL backends).
 func (s *FlatFileStore) CountDependencies(_ context.Context, issueID string) (int64, error) {
 	if err := s.checkClosed(); err != nil {
 		return 0, err
@@ -243,17 +419,11 @@ func (s *FlatFileStore) CountDependencies(_ context.Context, issueID string) (in
 	if err != nil {
 		return 0, err
 	}
-
-	var count int64
-	for _, dep := range issue.Dependencies {
-		if dep.Type != types.DepParentChild {
-			count++
-		}
-	}
-	return count, nil
+	return int64(len(issue.Dependencies)), nil
 }
 
-// CountDependents returns the number of issues that depend on issueID.
+// CountDependents returns the number of issues that depend on issueID via an
+// edge of any type (mirrors the bare per-target COUNT in the SQL backends).
 func (s *FlatFileStore) CountDependents(_ context.Context, issueID string) (int64, error) {
 	if err := s.checkClosed(); err != nil {
 		return 0, err
@@ -267,7 +437,7 @@ func (s *FlatFileStore) CountDependents(_ context.Context, issueID string) (int6
 	var count int64
 	for _, issue := range all {
 		for _, dep := range issue.Dependencies {
-			if dep.DependsOnID == issueID && dep.Type != types.DepParentChild {
+			if dep.DependsOnID == issueID {
 				count++
 				break
 			}

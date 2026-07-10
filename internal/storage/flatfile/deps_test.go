@@ -4,7 +4,6 @@ import (
 	"context"
 	"testing"
 
-	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/types"
 )
 
@@ -90,9 +89,11 @@ func TestRemoveDependencyNotFound(t *testing.T) {
 
 	s.CreateIssue(ctx, &types.Issue{ID: "d-1", Title: "Solo"}, "tester")
 
+	// Mirrors issueops.RemoveDependencyInTx: removing a non-existent edge is
+	// a silent no-op (pinned by the RemoveMissingAndUnblock conformance case).
 	err := s.RemoveDependency(ctx, "d-1", "nonexistent", "tester")
-	if err != storage.ErrNotFound {
-		t.Errorf("RemoveDependency missing = %v, want ErrNotFound", err)
+	if err != nil {
+		t.Errorf("RemoveDependency missing = %v, want nil (silent no-op)", err)
 	}
 }
 
@@ -141,9 +142,10 @@ func TestGetDependencyTree(t *testing.T) {
 		t.Errorf("tree len = %d, want 3", len(tree))
 	}
 
-	// Depth limit
+	// Depth limit: traversal stops when depth reaches maxDepth, so maxDepth=1
+	// yields just the root (pinned by the DependencyTree conformance case).
 	tree2, _ := s.GetDependencyTree(ctx, "t-3", 1, false, false)
-	if len(tree2) != 2 {
-		t.Errorf("depth-1 tree len = %d, want 2", len(tree2))
+	if len(tree2) != 1 {
+		t.Errorf("depth-1 tree len = %d, want 1 (root only)", len(tree2))
 	}
 }

@@ -5,10 +5,17 @@ import (
 	"sort"
 	"time"
 
+	"github.com/steveyegge/beads/internal/storage/sqlbuild"
 	"github.com/steveyegge/beads/internal/types"
 )
 
-// GetReadyWork returns open issues with no open blocking dependencies.
+// GetReadyWork returns unblocked workable issues. Mirrors
+// sqlbuild.BuildReadyWorkWhere + issueops.GetReadyWorkInTx: status open or
+// in_progress (unless an explicit status filter is given), not pinned, not
+// is_blocked (blocking edges to active targets, plus inherited parent
+// blocking), infra issue types excluded, deferred issues and children of
+// deferred parents excluded, and ParentID filtering follows transitive
+// parent-child descendants.
 func (s *FlatFileStore) GetReadyWork(ctx context.Context, filter types.WorkFilter) ([]*types.Issue, error) {
 	if err := s.checkClosed(); err != nil {
 		return nil, err
@@ -19,36 +26,66 @@ func (s *FlatFileStore) GetReadyWork(ctx context.Context, filter types.WorkFilte
 		return nil, err
 	}
 
-	statusMap := make(map[string]types.Status, len(all))
-	for _, issue := range all {
-		statusMap[issue.ID] = issue.Status
+	blocked := computeBlockedSet(all)
+
+	excludeTypes := make(map[types.IssueType]bool)
+	if filter.Type == "" {
+		for _, t := range sqlbuild.ReadyWorkExcludeTypes(filter.ExcludeTypes) {
+			excludeTypes[t] = true
+		}
+	}
+
+	var descendants map[string]bool
+	if filter.ParentID != nil {
+		descendants = parentDescendants(all, *filter.ParentID)
+	}
+
+	var deferredChildren map[string]bool
+	if !filter.IncludeDeferred {
+		deferredChildren = childrenOfDeferredParents(all)
 	}
 
 	var result []*types.Issue
 	for _, issue := range all {
-		if !isWorkableStatus(issue.Status) {
+		if filter.Status != "" {
+			if issue.Status != filter.Status {
+				continue
+			}
+		} else if issue.Status != types.StatusOpen && issue.Status != types.StatusInProgress {
+			continue
+		}
+		if issue.Pinned || blocked[issue.ID] {
 			continue
 		}
 		if issue.Ephemeral && !filter.IncludeEphemeral {
 			continue
 		}
-		if !filter.IncludeDeferred && isDeferred(issue) {
+		if filter.Type != "" {
+			if string(issue.IssueType) != filter.Type {
+				continue
+			}
+		} else if excludeTypes[issue.IssueType] {
 			continue
 		}
-		if !matchesWorkFilter(issue, filter) {
+		if !filter.IncludeDeferred {
+			if isDeferred(issue) || deferredChildren[issue.ID] {
+				continue
+			}
+		}
+		if descendants != nil && !descendants[issue.ID] {
 			continue
 		}
-		if hasOpenBlocker(issue, statusMap) {
+		if !matchesBasicWorkFilter(issue, filter) {
 			continue
 		}
 		result = append(result, issue)
 	}
 
-	sortReadyWork(result, filter.SortPolicy)
+	sortReadyIssues(result, filter.SortPolicy)
 
 	if filter.Offset > 0 && filter.Offset < len(result) {
 		result = result[filter.Offset:]
-	} else if filter.Offset >= len(result) {
+	} else if filter.Offset > 0 && filter.Offset >= len(result) {
 		return nil, nil
 	}
 	if filter.Limit > 0 && len(result) > filter.Limit {
@@ -58,7 +95,59 @@ func (s *FlatFileStore) GetReadyWork(ctx context.Context, filter types.WorkFilte
 	return result, nil
 }
 
+// parentDescendants returns the set of transitive parent-child descendants of
+// rootID (mirrors issueops.GetDescendantIDsInTx).
+func parentDescendants(all []*types.Issue, rootID string) map[string]bool {
+	children := make(map[string][]string)
+	for _, issue := range all {
+		for _, dep := range issue.Dependencies {
+			if dep.Type == types.DepParentChild {
+				children[dep.DependsOnID] = append(children[dep.DependsOnID], issue.ID)
+			}
+		}
+	}
+	descendants := make(map[string]bool)
+	queue := []string{rootID}
+	for len(queue) > 0 {
+		id := queue[0]
+		queue = queue[1:]
+		for _, child := range children[id] {
+			if !descendants[child] {
+				descendants[child] = true
+				queue = append(queue, child)
+			}
+		}
+	}
+	return descendants
+}
+
+// childrenOfDeferredParents returns IDs of issues whose parent has a future
+// defer_until (mirrors issueops.getChildrenOfDeferredParentsInTx).
+func childrenOfDeferredParents(all []*types.Issue) map[string]bool {
+	now := time.Now().UTC()
+	deferredParents := make(map[string]bool)
+	for _, issue := range all {
+		if issue.DeferUntil != nil && issue.DeferUntil.After(now) {
+			deferredParents[issue.ID] = true
+		}
+	}
+	if len(deferredParents) == 0 {
+		return nil
+	}
+	children := make(map[string]bool)
+	for _, issue := range all {
+		for _, dep := range issue.Dependencies {
+			if dep.Type == types.DepParentChild && deferredParents[dep.DependsOnID] {
+				children[issue.ID] = true
+				break
+			}
+		}
+	}
+	return children
+}
+
 // GetReadyWorkWithCounts is GetReadyWork plus dependency/comment counts.
+// Counts are blocks-only, mirroring the ready-with-counts SQL projection.
 func (s *FlatFileStore) GetReadyWorkWithCounts(ctx context.Context, filter types.WorkFilter) ([]*types.IssueWithCounts, error) {
 	issues, err := s.GetReadyWork(ctx, filter)
 	if err != nil {
@@ -70,14 +159,14 @@ func (s *FlatFileStore) GetReadyWorkWithCounts(ctx context.Context, filter types
 		return nil, err
 	}
 
-	depCounts := make(map[string]int)
+	dependentCounts := make(map[string]int)
 	parentMap := make(map[string]string)
 	for _, a := range all {
 		for _, dep := range a.Dependencies {
 			if dep.Type == types.DepParentChild {
 				parentMap[a.ID] = dep.DependsOnID
-			} else {
-				depCounts[dep.DependsOnID]++
+			} else if dep.Type == types.DepBlocks {
+				dependentCounts[dep.DependsOnID]++
 			}
 		}
 	}
@@ -86,7 +175,7 @@ func (s *FlatFileStore) GetReadyWorkWithCounts(ctx context.Context, filter types
 	for _, issue := range issues {
 		dc := 0
 		for _, dep := range issue.Dependencies {
-			if dep.Type != types.DepParentChild {
+			if dep.Type == types.DepBlocks {
 				dc++
 			}
 		}
@@ -94,7 +183,7 @@ func (s *FlatFileStore) GetReadyWorkWithCounts(ctx context.Context, filter types
 		wc := &types.IssueWithCounts{
 			Issue:           issue,
 			DependencyCount: dc,
-			DependentCount:  depCounts[issue.ID],
+			DependentCount:  dependentCounts[issue.ID],
 			CommentCount:    cc,
 		}
 		if p, ok := parentMap[issue.ID]; ok {
@@ -119,7 +208,10 @@ func (s *FlatFileStore) CountReadyWork(ctx context.Context, filter types.WorkFil
 	return len(issues), nil
 }
 
-// GetBlockedIssues returns open issues that have at least one open dependency.
+// GetBlockedIssues mirrors issueops.GetBlockedIssuesInTx: the blocked set is
+// the is_blocked projection; each blocked issue lists its direct active
+// blockers (blocks/waits-for/conditional-blocks edges), and an issue blocked
+// only by inheritance substitutes its parent as the sole blocker.
 func (s *FlatFileStore) GetBlockedIssues(_ context.Context, filter types.WorkFilter) ([]*types.BlockedIssue, error) {
 	if err := s.checkClosed(); err != nil {
 		return nil, err
@@ -130,6 +222,7 @@ func (s *FlatFileStore) GetBlockedIssues(_ context.Context, filter types.WorkFil
 		return nil, err
 	}
 
+	blocked := computeBlockedSet(all)
 	statusMap := make(map[string]types.Status, len(all))
 	for _, issue := range all {
 		statusMap[issue.ID] = issue.Status
@@ -137,7 +230,7 @@ func (s *FlatFileStore) GetBlockedIssues(_ context.Context, filter types.WorkFil
 
 	var result []*types.BlockedIssue
 	for _, issue := range all {
-		if !isWorkableStatus(issue.Status) {
+		if !blocked[issue.ID] {
 			continue
 		}
 		if !matchesWorkFilter(issue, filter) {
@@ -145,23 +238,39 @@ func (s *FlatFileStore) GetBlockedIssues(_ context.Context, filter types.WorkFil
 		}
 
 		var blockers []string
+		var parentID string
 		for _, dep := range issue.Dependencies {
-			if dep.Type == types.DepParentChild {
+			switch dep.Type {
+			case types.DepParentChild:
+				parentID = dep.DependsOnID
+			case types.DepBlocks, types.DepWaitsFor, types.DepConditionalBlocks:
+				if st, ok := statusMap[dep.DependsOnID]; ok && activeStatus(st) {
+					blockers = append(blockers, dep.DependsOnID)
+				}
+			default:
+			}
+		}
+		if len(blockers) == 0 {
+			// Inherited blocking: substitute the parent as the blocker.
+			if parentID == "" {
 				continue
 			}
-			if st, ok := statusMap[dep.DependsOnID]; ok && st != types.StatusClosed {
-				blockers = append(blockers, dep.DependsOnID)
-			}
+			blockers = []string{parentID}
 		}
 
-		if len(blockers) > 0 {
-			result = append(result, &types.BlockedIssue{
-				Issue:          *issue,
-				BlockedByCount: len(blockers),
-				BlockedBy:      blockers,
-			})
-		}
+		result = append(result, &types.BlockedIssue{
+			Issue:          *issue,
+			BlockedByCount: len(blockers),
+			BlockedBy:      blockers,
+		})
 	}
+
+	sort.Slice(result, func(i, j int) bool {
+		if result[i].Issue.Priority != result[j].Issue.Priority {
+			return result[i].Issue.Priority < result[j].Issue.Priority
+		}
+		return result[i].Issue.CreatedAt.After(result[j].Issue.CreatedAt)
+	})
 
 	if filter.Limit > 0 && len(result) > filter.Limit {
 		result = result[:filter.Limit]
@@ -215,10 +324,6 @@ func (s *FlatFileStore) GetEpicsEligibleForClosure(_ context.Context) ([]*types.
 	return result, nil
 }
 
-func isWorkableStatus(s types.Status) bool {
-	return s == types.StatusOpen || s == types.StatusInProgress || s == types.StatusBlocked
-}
-
 func isDeferred(issue *types.Issue) bool {
 	if issue.Status == types.StatusDeferred {
 		return true
@@ -229,25 +334,9 @@ func isDeferred(issue *types.Issue) bool {
 	return false
 }
 
-func hasOpenBlocker(issue *types.Issue, statusMap map[string]types.Status) bool {
-	for _, dep := range issue.Dependencies {
-		if dep.Type == types.DepParentChild {
-			continue
-		}
-		if st, ok := statusMap[dep.DependsOnID]; ok && st != types.StatusClosed {
-			return true
-		}
-	}
-	return false
-}
-
-func matchesWorkFilter(issue *types.Issue, f types.WorkFilter) bool {
-	if f.Status != "" && issue.Status != f.Status {
-		return false
-	}
-	if f.Type != "" && string(issue.IssueType) != f.Type {
-		return false
-	}
+// matchesBasicWorkFilter applies the WorkFilter fields that are common to the
+// ready and blocked paths: priority, assignee, and label constraints.
+func matchesBasicWorkFilter(issue *types.Issue, f types.WorkFilter) bool {
 	if f.Priority != nil && issue.Priority != *f.Priority {
 		return false
 	}
@@ -273,6 +362,19 @@ func matchesWorkFilter(issue *types.Issue, f types.WorkFilter) bool {
 			}
 		}
 	}
+	return true
+}
+
+func matchesWorkFilter(issue *types.Issue, f types.WorkFilter) bool {
+	if f.Status != "" && issue.Status != f.Status {
+		return false
+	}
+	if f.Type != "" && string(issue.IssueType) != f.Type {
+		return false
+	}
+	if !matchesBasicWorkFilter(issue, f) {
+		return false
+	}
 	for _, et := range f.ExcludeTypes {
 		if issue.IssueType == et {
 			return false
@@ -293,18 +395,48 @@ func matchesWorkFilter(issue *types.Issue, f types.WorkFilter) bool {
 	return true
 }
 
-func sortReadyWork(issues []*types.Issue, policy types.SortPolicy) {
-	switch policy {
-	case types.SortPolicyOldest:
-		sort.Slice(issues, func(i, j int) bool {
-			return issues[i].CreatedAt.Before(issues[j].CreatedAt)
-		})
-	case types.SortPolicyPriority, types.SortPolicyHybrid, "":
-		sort.Slice(issues, func(i, j int) bool {
-			if issues[i].Priority != issues[j].Priority {
-				return issues[i].Priority < issues[j].Priority
+// sortReadyIssues mirrors issueops.sortReadyIssues: hybrid puts recent
+// (<48h) issues first ordered by priority, older issues by created_at;
+// oldest is created_at ASC; priority is priority ASC then created_at DESC.
+// ID is the final tie-break everywhere.
+func sortReadyIssues(issues []*types.Issue, policy types.SortPolicy) {
+	recentCutoff := time.Now().UTC().Add(-48 * time.Hour)
+	sort.SliceStable(issues, func(i, j int) bool {
+		a, b := issues[i], issues[j]
+		switch policy {
+		case types.SortPolicyOldest:
+			return issueCreatedBefore(a, b)
+		case types.SortPolicyPriority:
+			return issuePriorityBefore(a, b)
+		case types.SortPolicyHybrid, "":
+			aRecent := !a.CreatedAt.Before(recentCutoff)
+			bRecent := !b.CreatedAt.Before(recentCutoff)
+			if aRecent != bRecent {
+				return aRecent
 			}
-			return issues[i].CreatedAt.Before(issues[j].CreatedAt)
-		})
+			if aRecent && a.Priority != b.Priority {
+				return a.Priority < b.Priority
+			}
+			return issueCreatedBefore(a, b)
+		default:
+			return issuePriorityBefore(a, b)
+		}
+	})
+}
+
+func issuePriorityBefore(a, b *types.Issue) bool {
+	if a.Priority != b.Priority {
+		return a.Priority < b.Priority
 	}
+	if !a.CreatedAt.Equal(b.CreatedAt) {
+		return a.CreatedAt.After(b.CreatedAt)
+	}
+	return a.ID < b.ID
+}
+
+func issueCreatedBefore(a, b *types.Issue) bool {
+	if !a.CreatedAt.Equal(b.CreatedAt) {
+		return a.CreatedAt.Before(b.CreatedAt)
+	}
+	return a.ID < b.ID
 }
