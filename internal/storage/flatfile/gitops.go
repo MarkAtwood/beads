@@ -1,5 +1,7 @@
-// gitops.go implements VersionControl, HistoryViewer, RemoteStore, SyncStore,
-// and FederationStore interfaces using git commands on the .beads/ directory.
+// gitops.go implements the VersionControl, HistoryViewer, RemoteStore, and
+// SyncStore interfaces using git commands on the .beads/ directory.
+// FederationStore is NOT implemented (flat-file syncs through plain git
+// remotes); it resolves to the generated typed-unsupported shell.
 package flatfile
 
 import (
@@ -504,24 +506,4 @@ func (s *FlatFileStore) SyncStatus(ctx context.Context, peer string) (*storage.S
 		LocalAhead:  ahead,
 		LocalBehind: behind,
 	}, nil
-}
-
-// ── FederationStore (stub) ───────────────────────────────────────────
-
-var errFederationNotSupported = fmt.Errorf("flatfile: federation not supported (use git remotes instead)")
-
-func (s *FlatFileStore) AddFederationPeer(ctx context.Context, _ *storage.FederationPeer) error {
-	return errFederationNotSupported
-}
-
-func (s *FlatFileStore) GetFederationPeer(ctx context.Context, _ string) (*storage.FederationPeer, error) {
-	return nil, errFederationNotSupported
-}
-
-func (s *FlatFileStore) ListFederationPeers(ctx context.Context) ([]*storage.FederationPeer, error) {
-	return nil, nil
-}
-
-func (s *FlatFileStore) RemoveFederationPeer(ctx context.Context, _ string) error {
-	return errFederationNotSupported
 }
