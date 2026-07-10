@@ -12,6 +12,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -475,6 +476,13 @@ func (s *FlatFileStore) PromoteFromEphemeral(_ context.Context, id string, _ str
 	return s.writeIssue(issue)
 }
 
+// GetNextChildID reserves and returns the next hierarchical child ID for
+// parentID. Mirrors issueops.GetNextChildIDTx: it reads the persisted
+// per-parent counter, self-heals to the max existing DIRECT child number
+// (grandchildren excluded), advances, and persists the new value — so
+// consecutive calls advance even when no issue is created in between.
+// Wisps live in the same issues directory, so wisp parents take the same
+// unified scan the SQL backends express as wisp-table routing.
 func (s *FlatFileStore) GetNextChildID(_ context.Context, parentID string) (string, error) {
 	if err := s.checkClosed(); err != nil {
 		return "", err
@@ -483,18 +491,32 @@ func (s *FlatFileStore) GetNextChildID(_ context.Context, parentID string) (stri
 	if err != nil {
 		return "", err
 	}
-	maxChild := 0
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	state, err := s.readCounter()
+	if err != nil {
+		return "", err
+	}
+
+	lastChild := state.Children[parentID]
 	prefix := parentID + "."
 	for _, issue := range all {
-		if strings.HasPrefix(issue.ID, prefix) {
-			suffix := strings.TrimPrefix(issue.ID, prefix)
-			var n int
-			if _, err := fmt.Sscanf(suffix, "%d", &n); err == nil && n > maxChild {
-				maxChild = n
-			}
+		suffix, ok := strings.CutPrefix(issue.ID, prefix)
+		if !ok || strings.Contains(suffix, ".") {
+			continue // not a direct child
+		}
+		if n, err := strconv.Atoi(suffix); err == nil && n > lastChild {
+			lastChild = n
 		}
 	}
-	return fmt.Sprintf("%s.%d", parentID, maxChild+1), nil
+
+	nextChild := lastChild + 1
+	state.Children[parentID] = nextChild
+	if err := s.writeCounter(state); err != nil {
+		return "", err
+	}
+	return fmt.Sprintf("%s.%d", parentID, nextChild), nil
 }
 
 // ── DependencyQueryStore ─────────────────────────────────────────────
