@@ -12,6 +12,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 
@@ -568,6 +569,8 @@ func (s *FlatFileStore) GetAllDependencyRecords(_ context.Context) (map[string][
 	return result, nil
 }
 
+// GetDependencyCounts mirrors issueops.GetDependencyCountsInTx: both counts
+// are restricted to type = 'blocks' edges only.
 func (s *FlatFileStore) GetDependencyCounts(_ context.Context, issueIDs []string) (map[string]*types.DependencyCounts, error) {
 	if err := s.checkClosed(); err != nil {
 		return nil, err
@@ -576,31 +579,22 @@ func (s *FlatFileStore) GetDependencyCounts(_ context.Context, issueIDs []string
 	if err != nil {
 		return nil, err
 	}
-	issueMap := make(map[string]*types.Issue, len(all))
-	depCounts := make(map[string]int)
-	for _, issue := range all {
-		issueMap[issue.ID] = issue
-		for _, dep := range issue.Dependencies {
-			if dep.Type != types.DepParentChild {
-				depCounts[dep.DependsOnID]++
-			}
-		}
-	}
+	idSet := makeStringSet(issueIDs)
 	result := make(map[string]*types.DependencyCounts, len(issueIDs))
 	for _, id := range issueIDs {
-		issue, ok := issueMap[id]
-		if !ok {
-			continue
-		}
-		dc := 0
+		result[id] = &types.DependencyCounts{}
+	}
+	for _, issue := range all {
 		for _, dep := range issue.Dependencies {
-			if dep.Type != types.DepParentChild {
-				dc++
+			if dep.Type != types.DepBlocks {
+				continue
 			}
-		}
-		result[id] = &types.DependencyCounts{
-			DependencyCount: dc,
-			DependentCount:  depCounts[id],
+			if idSet[issue.ID] {
+				result[issue.ID].DependencyCount++
+			}
+			if idSet[dep.DependsOnID] {
+				result[dep.DependsOnID].DependentCount++
+			}
 		}
 	}
 	return result, nil
@@ -638,6 +632,11 @@ func (s *FlatFileStore) GetBlockingInfoForIssues(_ context.Context, issueIDs []s
 	return blockedBy, blocks, parentMap, nil
 }
 
+// IsBlocked mirrors issueops.IsBlockedInTx: the verdict follows the
+// is_blocked projection (blocking edges to active targets, plus inherited
+// parent blocking), and the blocker descriptions enumerate direct
+// blocks/waits-for/conditional-blocks edges whose target is active — bare id
+// for 'blocks', "<id> (<type>)" for the other types.
 func (s *FlatFileStore) IsBlocked(_ context.Context, issueID string) (bool, []string, error) {
 	if err := s.checkClosed(); err != nil {
 		return false, nil, err
@@ -650,22 +649,36 @@ func (s *FlatFileStore) IsBlocked(_ context.Context, issueID string) (bool, []st
 	if err != nil {
 		return false, nil, err
 	}
+	if !computeBlockedSet(all)[issueID] {
+		return false, nil, nil
+	}
 	statusMap := make(map[string]types.Status, len(all))
 	for _, a := range all {
 		statusMap[a.ID] = a.Status
 	}
 	var blockers []string
 	for _, dep := range issue.Dependencies {
-		if dep.Type == types.DepParentChild {
+		if dep.Type != types.DepBlocks && dep.Type != types.DepWaitsFor && dep.Type != types.DepConditionalBlocks {
 			continue
 		}
-		if st, ok := statusMap[dep.DependsOnID]; ok && st != types.StatusClosed {
+		st, ok := statusMap[dep.DependsOnID]
+		if !ok || !activeStatus(st) {
+			continue
+		}
+		if dep.Type != types.DepBlocks {
+			blockers = append(blockers, dep.DependsOnID+" ("+string(dep.Type)+")")
+		} else {
 			blockers = append(blockers, dep.DependsOnID)
 		}
 	}
-	return len(blockers) > 0, blockers, nil
+	return true, blockers, nil
 }
 
+// GetNewlyUnblockedByClose mirrors issueops.GetNewlyUnblockedByCloseInTx:
+// candidates are active (not closed/pinned) issues with a 'blocks' edge on
+// the hypothetically-closed issue; a candidate stays blocked when any OTHER
+// 'blocks' edge targets an existing active issue. conditional-blocks edges
+// participate on neither side.
 func (s *FlatFileStore) GetNewlyUnblockedByClose(_ context.Context, closedIssueID string) ([]*types.Issue, error) {
 	if err := s.checkClosed(); err != nil {
 		return nil, err
@@ -678,33 +691,36 @@ func (s *FlatFileStore) GetNewlyUnblockedByClose(_ context.Context, closedIssueI
 	for _, a := range all {
 		statusMap[a.ID] = a.Status
 	}
-	statusMap[closedIssueID] = types.StatusClosed
 
 	var result []*types.Issue
 	for _, issue := range all {
-		if !isWorkableStatus(issue.Status) {
+		if !activeStatus(issue.Status) {
 			continue
 		}
 		dependsOnClosed := false
-		allResolved := true
+		stillBlocked := false
 		for _, dep := range issue.Dependencies {
-			if dep.Type == types.DepParentChild {
+			if dep.Type != types.DepBlocks {
 				continue
 			}
 			if dep.DependsOnID == closedIssueID {
 				dependsOnClosed = true
+				continue
 			}
-			if st, ok := statusMap[dep.DependsOnID]; ok && st != types.StatusClosed {
-				allResolved = false
+			if st, ok := statusMap[dep.DependsOnID]; ok && activeStatus(st) {
+				stillBlocked = true
 			}
 		}
-		if dependsOnClosed && allResolved {
+		if dependsOnClosed && !stillBlocked {
 			result = append(result, issue)
 		}
 	}
+	sort.Slice(result, func(i, j int) bool { return result[i].ID < result[j].ID })
 	return result, nil
 }
 
+// DetectCycles mirrors issueops.DetectCyclesInTx: only 'blocks' and
+// 'conditional-blocks' edges form the cycle-detection graph.
 func (s *FlatFileStore) DetectCycles(_ context.Context) ([][]*types.Issue, error) {
 	if err := s.checkClosed(); err != nil {
 		return nil, err
@@ -714,15 +730,10 @@ func (s *FlatFileStore) DetectCycles(_ context.Context) ([][]*types.Issue, error
 		return nil, err
 	}
 	issueMap := make(map[string]*types.Issue, len(all))
-	adj := make(map[string][]string)
 	for _, issue := range all {
 		issueMap[issue.ID] = issue
-		for _, dep := range issue.Dependencies {
-			if dep.Type != types.DepParentChild {
-				adj[issue.ID] = append(adj[issue.ID], dep.DependsOnID)
-			}
-		}
 	}
+	adj := blockingAdjacency(all)
 	// Simple cycle detection via DFS with coloring.
 	const (
 		white = 0
@@ -771,36 +782,43 @@ func (s *FlatFileStore) DetectCycles(_ context.Context) ([][]*types.Issue, error
 	return cycles, nil
 }
 
+// FindWispDependentsRecursive mirrors issueops.FindWispDependentsRecursiveInTx:
+// nil/empty input returns (nil, nil); otherwise it walks wisp-sourced edges
+// (the wisp_dependencies table on SQL) transitively, so durable dependents
+// are excluded, and the seeds themselves are not part of the result.
 func (s *FlatFileStore) FindWispDependentsRecursive(_ context.Context, ids []string) (map[string]bool, error) {
 	if err := s.checkClosed(); err != nil {
 		return nil, err
+	}
+	if len(ids) == 0 {
+		return nil, nil
 	}
 	all, err := s.loadAllIssues()
 	if err != nil {
 		return nil, err
 	}
-	// Build reverse dep map.
+	// Reverse edges whose SOURCE is a wisp (wisp_dependencies rows).
 	dependents := make(map[string][]string)
 	for _, issue := range all {
+		if !issueops.IsWisp(issue) {
+			continue
+		}
 		for _, dep := range issue.Dependencies {
-			if dep.Type != types.DepParentChild {
-				dependents[dep.DependsOnID] = append(dependents[dep.DependsOnID], issue.ID)
-			}
+			dependents[dep.DependsOnID] = append(dependents[dep.DependsOnID], issue.ID)
 		}
 	}
+	seeds := makeStringSet(ids)
 	result := make(map[string]bool)
 	queue := append([]string{}, ids...)
 	for len(queue) > 0 {
 		id := queue[0]
 		queue = queue[1:]
-		if result[id] {
-			continue
-		}
-		result[id] = true
-		for _, dep := range dependents[id] {
-			if !result[dep] {
-				queue = append(queue, dep)
+		for _, dependent := range dependents[id] {
+			if result[dependent] || seeds[dependent] {
+				continue
 			}
+			result[dependent] = true
+			queue = append(queue, dependent)
 		}
 	}
 	return result, nil
@@ -834,8 +852,10 @@ func (s *FlatFileStore) CountDependentsByStatus(_ context.Context, issueID strin
 		if issue.Status != status {
 			continue
 		}
+		// No type filter — parent-child dependents count too (mirrors the
+		// bare per-target COUNT in the SQL backends).
 		for _, dep := range issue.Dependencies {
-			if dep.DependsOnID == issueID && dep.Type != types.DepParentChild {
+			if dep.DependsOnID == issueID {
 				count++
 				break
 			}

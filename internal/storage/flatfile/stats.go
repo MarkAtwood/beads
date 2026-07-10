@@ -6,6 +6,24 @@ import (
 	"github.com/steveyegge/beads/internal/types"
 )
 
+// isWorkableStatus and hasOpenBlocker back the statistics ready-count only;
+// the ready-work path itself uses the is_blocked projection in ready.go.
+func isWorkableStatus(s types.Status) bool {
+	return s == types.StatusOpen || s == types.StatusInProgress || s == types.StatusBlocked
+}
+
+func hasOpenBlocker(issue *types.Issue, statusMap map[string]types.Status) bool {
+	for _, dep := range issue.Dependencies {
+		if dep.Type == types.DepParentChild {
+			continue
+		}
+		if st, ok := statusMap[dep.DependsOnID]; ok && st != types.StatusClosed {
+			return true
+		}
+	}
+	return false
+}
+
 // GetStatistics returns aggregate metrics across all issues.
 func (s *FlatFileStore) GetStatistics(_ context.Context) (*types.Statistics, error) {
 	if err := s.checkClosed(); err != nil {
