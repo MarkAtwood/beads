@@ -157,16 +157,26 @@ func (s *FlatFileStore) SlotGet(_ context.Context, issueID, key string) (string,
 		return "", err
 	}
 	if len(issue.Metadata) == 0 {
-		return "", nil
+		return "", fmt.Errorf("flatfile: no slot %q on %s: no metadata", key, issueID)
 	}
 	var meta map[string]interface{}
 	if err := json.Unmarshal(issue.Metadata, &meta); err != nil {
-		return "", nil
+		return "", fmt.Errorf("flatfile: parse issue metadata: %w", err)
 	}
-	if v, ok := meta[key]; ok {
-		return fmt.Sprintf("%v", v), nil
+	v, ok := meta[key]
+	if !ok {
+		return "", fmt.Errorf("flatfile: no slot %q on %s: key not found", key, issueID)
 	}
-	return "", nil
+	// Mirrors sqlkit SlotGet: string values return raw; every other JSON
+	// type is re-marshaled to its JSON text form.
+	if str, ok := v.(string); ok {
+		return str, nil
+	}
+	raw, err := json.Marshal(v)
+	if err != nil {
+		return "", fmt.Errorf("flatfile: marshal slot value %s.%s: %w", issueID, key, err)
+	}
+	return string(raw), nil
 }
 
 func (s *FlatFileStore) SlotClear(_ context.Context, issueID, key, _ string) error {
