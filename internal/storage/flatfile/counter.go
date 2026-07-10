@@ -8,9 +8,12 @@ import (
 	"os"
 )
 
-// counterState holds the per-prefix sequential ID counters.
+// counterState holds the per-prefix sequential ID counters and the
+// per-parent hierarchical child-ID counters (the flat-file analog of the
+// child_counters table).
 type counterState struct {
 	Prefixes map[string]int `json:"prefixes"`
+	Children map[string]int `json:"children,omitempty"`
 }
 
 // nextSequentialID returns the next sequential ID for the given prefix and
@@ -54,7 +57,7 @@ func (s *FlatFileStore) readCounter() (*counterState, error) {
 	data, err := os.ReadFile(s.counterPath)
 	if err != nil {
 		if errors.Is(err, fs.ErrNotExist) {
-			return &counterState{Prefixes: make(map[string]int)}, nil
+			return &counterState{Prefixes: make(map[string]int), Children: make(map[string]int)}, nil
 		}
 		return nil, fmt.Errorf("flatfile: read counter: %w", err)
 	}
@@ -65,6 +68,9 @@ func (s *FlatFileStore) readCounter() (*counterState, error) {
 	}
 	if state.Prefixes == nil {
 		state.Prefixes = make(map[string]int)
+	}
+	if state.Children == nil {
+		state.Children = make(map[string]int)
 	}
 	return &state, nil
 }
