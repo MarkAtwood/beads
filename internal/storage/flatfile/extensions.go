@@ -239,13 +239,42 @@ func (s *FlatFileStore) DeleteIssuesBySourceRepo(_ context.Context, sourceRepo s
 	return deleted, lastErr
 }
 
-func (s *FlatFileStore) UpdateIssueID(_ context.Context, oldID, newID string, issue *types.Issue, _ string) error {
+// UpdateIssueID renames an issue. Mirrors issueops.updateIssueIDInTx: only
+// id, title, description, design, acceptance_criteria, notes, and updated_at
+// are taken from the passed issue — every other stored column (status,
+// priority, ephemerality, dependencies, ...) is preserved. Renaming onto an
+// existing id errors, and a 'renamed' event is recorded keyed to the new id.
+func (s *FlatFileStore) UpdateIssueID(_ context.Context, oldID, newID string, issue *types.Issue, actor string) error {
 	if err := s.checkClosed(); err != nil {
 		return err
 	}
-	issue.ID = newID
-	issue.UpdatedAt = time.Now().UTC()
-	if err := s.writeIssue(issue); err != nil {
+
+	stored, err := s.readIssue(oldID)
+	if err != nil {
+		if errors.Is(err, storage.ErrNotFound) {
+			return fmt.Errorf("issue not found: %s", oldID)
+		}
+		return err
+	}
+	if _, err := os.Stat(s.issueFilename(newID)); err == nil {
+		return fmt.Errorf("flatfile: cannot rename %s to %s: issue already exists", oldID, newID)
+	}
+
+	stored.ID = newID
+	stored.Title = issue.Title
+	stored.Description = issue.Description
+	stored.Design = issue.Design
+	stored.AcceptanceCriteria = issue.AcceptanceCriteria
+	stored.Notes = issue.Notes
+	stored.UpdatedAt = time.Now().UTC()
+	// Outbound edges live inside this issue's JSON; keep their source in sync.
+	for _, dep := range stored.Dependencies {
+		if dep.IssueID == oldID {
+			dep.IssueID = newID
+		}
+	}
+
+	if err := s.writeIssue(stored); err != nil {
 		return err
 	}
 	// Remove old issue file only after new file is safely written.
@@ -265,12 +294,19 @@ func (s *FlatFileStore) UpdateIssueID(_ context.Context, oldID, newID string, is
 		_ = os.Rename(oldEventFile, newEventFile)
 	}
 
-	// Update dependency references in all other issues.
+	if err := s.recordEvent(newID, types.EventType("renamed"), actor, oldID, newID); err != nil {
+		return err
+	}
+
+	// Update inbound dependency references in all other issues.
 	all, err := s.loadAllIssues()
 	if err != nil {
 		return nil // best-effort: issue file already renamed
 	}
 	for _, other := range all {
+		if other.ID == newID {
+			continue
+		}
 		changed := false
 		for _, dep := range other.Dependencies {
 			if dep.DependsOnID == oldID {
