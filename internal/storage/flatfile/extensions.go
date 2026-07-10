@@ -852,13 +852,28 @@ func (s *FlatFileStore) CountDependentsByStatus(_ context.Context, issueID strin
 
 // ── AnnotationStore ──────────────────────────────────────────────────
 
-func (s *FlatFileStore) AddComment(ctx context.Context, issueID, actor, comment string) error {
-	_, err := s.AddIssueComment(ctx, issueID, actor, comment)
-	return err
+// AddComment records a `commented` audit EVENT, not a structured comment.
+// Mirrors issueops.AddCommentEventInTx.
+func (s *FlatFileStore) AddComment(_ context.Context, issueID, actor, comment string) error {
+	if err := s.checkClosed(); err != nil {
+		return err
+	}
+	issue, err := s.readIssue(issueID)
+	if err != nil {
+		return err
+	}
+	return s.recordCommentEvent(issueID, issueops.IsWisp(issue), types.EventCommented, actor, comment)
 }
 
 func (s *FlatFileStore) ImportIssueComment(_ context.Context, issueID, author, text string, createdAt time.Time) (*types.Comment, error) {
 	if err := s.checkClosed(); err != nil {
+		return nil, err
+	}
+	// Mirror issueops.ImportIssueCommentInTx: reject before insert.
+	if _, err := s.readIssue(issueID); err != nil {
+		if errors.Is(err, storage.ErrNotFound) {
+			return nil, fmt.Errorf("issue %s not found", issueID)
+		}
 		return nil, err
 	}
 	comment := &types.Comment{

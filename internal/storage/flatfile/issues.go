@@ -14,6 +14,7 @@ import (
 
 	"github.com/steveyegge/beads/internal/idgen"
 	"github.com/steveyegge/beads/internal/storage"
+	"github.com/steveyegge/beads/internal/storage/issueops"
 	"github.com/steveyegge/beads/internal/types"
 )
 
@@ -263,7 +264,25 @@ func (s *FlatFileStore) CreateIssue(ctx context.Context, issue *types.Issue, act
 		issue.Status = types.StatusOpen
 	}
 
-	return s.writeIssue(issue)
+	if err := s.writeIssue(issue); err != nil {
+		return err
+	}
+	if err := s.recordEvent(issue.ID, types.EventCreated, actor, "", ""); err != nil {
+		return err
+	}
+	// Mirror issueops.PersistLabels: one label_added event per distinct label
+	// carried on the created issue.
+	seen := make(map[string]struct{}, len(issue.Labels))
+	for _, label := range issue.Labels {
+		if _, ok := seen[label]; ok {
+			continue
+		}
+		seen[label] = struct{}{}
+		if err := s.recordCommentEvent(issue.ID, issueops.IsWisp(issue), types.EventLabelAdded, actor, "Added label: "+label); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // CreateIssues creates multiple issues in sequence.
@@ -323,7 +342,10 @@ func (s *FlatFileStore) GetIssuesByIDs(_ context.Context, ids []string) ([]*type
 }
 
 // UpdateIssue applies a map of field updates to an existing issue.
-func (s *FlatFileStore) UpdateIssue(_ context.Context, id string, updates map[string]interface{}, _ string) error {
+// Mirrors issueops.UpdateIssueInTx: field names are validated against the
+// allowed set, closed_at/started_at are auto-managed on status transitions,
+// and an event is always recorded (even for no-op status writes).
+func (s *FlatFileStore) UpdateIssue(ctx context.Context, id string, updates map[string]interface{}, actor string) error {
 	if err := s.checkClosed(); err != nil {
 		return err
 	}
@@ -331,62 +353,115 @@ func (s *FlatFileStore) UpdateIssue(_ context.Context, id string, updates map[st
 	issue, err := s.readIssue(id)
 	if err != nil {
 		return err
+	}
+	oldIssue := *issue
+
+	for key := range updates {
+		if !issueops.IsAllowedUpdateField(key) {
+			return fmt.Errorf("invalid field for update: %s", key)
+		}
+	}
+	if rawType, ok := updates["issue_type"]; ok {
+		if issueType, ok := rawType.(string); ok {
+			customTypes, err := s.GetCustomTypes(ctx)
+			if err != nil {
+				return fmt.Errorf("flatfile: get custom types for validation: %w", err)
+			}
+			if !types.IssueType(issueType).IsValidWithCustom(customTypes) {
+				return fmt.Errorf("invalid issue type: %s", issueType)
+			}
+		}
+	}
+	if rawMeta, ok := updates["metadata"]; ok {
+		metadataStr, err := storage.NormalizeMetadataValue(rawMeta)
+		if err != nil {
+			return fmt.Errorf("invalid metadata: %w", err)
+		}
+		issue.Metadata = json.RawMessage(metadataStr)
 	}
 
 	applyUpdates(issue, updates)
-	issue.UpdatedAt = time.Now().UTC()
 
-	return s.writeIssue(issue)
+	newStatus, hasStatus := updateStatusValue(updates)
+	if hasStatus {
+		// Auto-manage closed_at (set on close, clear on reopen).
+		if _, explicit := updates["closed_at"]; !explicit {
+			if newStatus == types.StatusClosed {
+				now := time.Now().UTC()
+				issue.ClosedAt = &now
+			} else if oldIssue.Status == types.StatusClosed {
+				issue.ClosedAt = nil
+				issue.CloseReason = ""
+			}
+		}
+		// Auto-manage started_at (stamped once on first in_progress transition).
+		if _, explicit := updates["started_at"]; !explicit {
+			if newStatus == types.StatusInProgress && oldIssue.StartedAt == nil {
+				now := time.Now().UTC()
+				issue.StartedAt = &now
+			}
+		}
+		// Auto-clear pinned when status transitions away from "pinned".
+		if _, explicit := updates["pinned"]; !explicit && oldIssue.Pinned && newStatus != types.StatusPinned {
+			issue.Pinned = false
+		}
+	}
+
+	issue.UpdatedAt = time.Now().UTC()
+	if err := s.writeIssue(issue); err != nil {
+		return err
+	}
+
+	oldData, _ := json.Marshal(oldIssue)
+	newData, _ := json.Marshal(updates)
+	eventType := issueops.DetermineEventType(&oldIssue, updates)
+	return s.recordEvent(id, eventType, actor, string(oldData), string(newData))
 }
 
-// ReopenIssue sets the issue status back to open.
-func (s *FlatFileStore) ReopenIssue(_ context.Context, id string, reason string, _ string) error {
-	if err := s.checkClosed(); err != nil {
-		return err
+// updateStatusValue extracts the "status" update value, tolerating both string
+// and types.Status, mirroring the type switches in issueops/update.go.
+func updateStatusValue(updates map[string]interface{}) (types.Status, bool) {
+	raw, ok := updates["status"]
+	if !ok {
+		return "", false
 	}
-
-	issue, err := s.readIssue(id)
-	if err != nil {
-		return err
+	switch v := raw.(type) {
+	case string:
+		return types.Status(v), true
+	case types.Status:
+		return v, true
+	default:
+		return "", false
 	}
-
-	issue.Status = types.StatusOpen
-	issue.ClosedAt = nil
-	issue.CloseReason = reason
-	issue.ClosedBySession = ""
-	issue.UpdatedAt = time.Now().UTC()
-
-	return s.writeIssue(issue)
 }
 
-// UpdateIssueType changes the issue_type field after validating the type
-// against built-in and configured custom types, mirroring the validation
-// the SQL backends run inside UpdateIssueInTx via ResolveCustomTypesInTx.
-func (s *FlatFileStore) UpdateIssueType(ctx context.Context, id string, issueType string, _ string) error {
-	if err := s.checkClosed(); err != nil {
+// ReopenIssue reopens an issue. Mirrors sqlkit.ReopenIssue: reopen via
+// UpdateIssue (which always records a status event and clears closed_at /
+// close_reason via the auto-management path), then attach the reason as a
+// commented event when non-empty.
+func (s *FlatFileStore) ReopenIssue(ctx context.Context, id string, reason string, actor string) error {
+	updates := map[string]interface{}{
+		"status":      string(types.StatusOpen),
+		"defer_until": nil,
+	}
+	if err := s.UpdateIssue(ctx, id, updates, actor); err != nil {
 		return err
 	}
-
-	custom, err := s.GetCustomTypes(ctx)
-	if err != nil {
-		return err
+	if reason != "" {
+		return s.AddComment(ctx, id, actor, reason)
 	}
-	if !types.IssueType(issueType).IsValidWithCustom(custom) {
-		return fmt.Errorf("flatfile: invalid issue type %q", issueType)
-	}
-
-	issue, err := s.readIssue(id)
-	if err != nil {
-		return err
-	}
-
-	issue.IssueType = types.IssueType(issueType)
-	issue.UpdatedAt = time.Now().UTC()
-
-	return s.writeIssue(issue)
+	return nil
 }
 
-// CloseIssue marks an issue as closed.
+// UpdateIssueType changes the issue_type field. Mirrors sqlkit.UpdateIssueType,
+// which delegates to UpdateIssue for validation and event recording.
+func (s *FlatFileStore) UpdateIssueType(ctx context.Context, id string, issueType string, actor string) error {
+	return s.UpdateIssue(ctx, id, map[string]interface{}{"issue_type": issueType}, actor)
+}
+
+// CloseIssue marks an issue as closed and records the close event. Mirrors
+// issueops.CloseIssueInTx: closing an already-closed issue is a silent no-op
+// that preserves the original close_reason/closed_at and mints no event.
 func (s *FlatFileStore) CloseIssue(_ context.Context, id string, reason string, actor string, session string) error {
 	if err := s.checkClosed(); err != nil {
 		return err
@@ -396,18 +471,26 @@ func (s *FlatFileStore) CloseIssue(_ context.Context, id string, reason string, 
 	if err != nil {
 		return err
 	}
+	if issue.Status == types.StatusClosed {
+		return nil // AlreadyClosed: first close wins
+	}
 
 	now := time.Now().UTC()
 	issue.Status = types.StatusClosed
 	issue.ClosedAt = &now
 	issue.CloseReason = reason
 	issue.ClosedBySession = session
+	issue.LeaseExpiresAt = nil
+	issue.HeartbeatAt = nil
 	issue.UpdatedAt = now
 	if issue.Assignee == "" && actor != "" {
 		issue.Assignee = actor
 	}
 
-	return s.writeIssue(issue)
+	if err := s.writeIssue(issue); err != nil {
+		return err
+	}
+	return s.recordEvent(id, types.EventClosed, actor, "", reason)
 }
 
 // DeleteIssue removes an issue file from disk.
@@ -500,12 +583,36 @@ func applyUpdates(issue *types.Issue, updates map[string]interface{}) {
 				issue.Metadata = json.RawMessage(v)
 			}
 		case "due_at":
-			if v, ok := val.(*time.Time); ok {
-				issue.DueAt = v
-			}
+			issue.DueAt = timePtrValue(val)
 		case "defer_until":
-			if v, ok := val.(*time.Time); ok {
-				issue.DeferUntil = v
+			issue.DeferUntil = timePtrValue(val)
+		case "started_at":
+			issue.StartedAt = timePtrValue(val)
+		case "closed_at":
+			issue.ClosedAt = timePtrValue(val)
+		case "close_reason":
+			if v, ok := val.(string); ok {
+				issue.CloseReason = v
+			}
+		case "closed_by_session":
+			if v, ok := val.(string); ok {
+				issue.ClosedBySession = v
+			}
+		case "source_repo":
+			if v, ok := val.(string); ok {
+				issue.SourceRepo = v
+			}
+		case "wisp":
+			if v, ok := val.(bool); ok {
+				issue.Ephemeral = v
+			}
+		case "no_history":
+			if v, ok := val.(bool); ok {
+				issue.NoHistory = v
+			}
+		case "wisp_type":
+			if v, ok := val.(string); ok {
+				issue.WispType = types.WispType(v)
 			}
 		case "estimated_minutes":
 			switch v := val.(type) {
@@ -518,5 +625,18 @@ func applyUpdates(issue *types.Issue, updates map[string]interface{}) {
 				issue.EstimatedMinutes = v
 			}
 		}
+	}
+}
+
+// timePtrValue coerces an update value into a *time.Time, treating nil (and
+// unrecognized types) as a clear.
+func timePtrValue(val interface{}) *time.Time {
+	switch v := val.(type) {
+	case *time.Time:
+		return v
+	case time.Time:
+		return &v
+	default:
+		return nil
 	}
 }
