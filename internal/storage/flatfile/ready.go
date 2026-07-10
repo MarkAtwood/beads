@@ -105,6 +105,20 @@ func (s *FlatFileStore) GetReadyWorkWithCounts(ctx context.Context, filter types
 	return result, nil
 }
 
+// CountReadyWork returns the total ready-work count for the filter,
+// ignoring pagination, satisfying storage.ReadyWorkCounter. It equals
+// len(GetReadyWork(filter with Limit=0)); with an in-memory scan there is
+// no cheaper count than materializing the ready set.
+func (s *FlatFileStore) CountReadyWork(ctx context.Context, filter types.WorkFilter) (int, error) {
+	filter.Limit = 0
+	filter.Offset = 0
+	issues, err := s.GetReadyWork(ctx, filter)
+	if err != nil {
+		return 0, err
+	}
+	return len(issues), nil
+}
+
 // GetBlockedIssues returns open issues that have at least one open dependency.
 func (s *FlatFileStore) GetBlockedIssues(_ context.Context, filter types.WorkFilter) ([]*types.BlockedIssue, error) {
 	if err := s.checkClosed(); err != nil {
