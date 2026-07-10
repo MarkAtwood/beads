@@ -8,22 +8,33 @@ import (
 	"path/filepath"
 
 	"github.com/spf13/cobra"
+	"github.com/steveyegge/beads/cmd/bd/doctor"
 	"github.com/steveyegge/beads/internal/beads"
 	"github.com/steveyegge/beads/internal/configfile"
+	"github.com/steveyegge/beads/internal/storage/dolt"
 	"github.com/steveyegge/beads/internal/storage/flatfile"
 	"github.com/steveyegge/beads/internal/types"
 )
 
 var migrateFlatfileCmd = &cobra.Command{
 	Use:   "flatfile",
-	Short: "Migrate from Dolt to flat-file storage",
-	Long: `Migrate all issues, comments, labels, and config from the Dolt database
-to flat-file JSON storage (.beads/issues/*.json).
+	Short: "Migrate between Dolt and flat-file storage",
+	Long: `Migrate all issues, dependencies, comments, labels, metadata, and config
+from the Dolt database to flat-file JSON storage (.beads/issues/*.json).
 
 After migration, the Dolt database is no longer needed and can be removed.
-The flat-file backend uses git for sync instead of Dolt remotes.`,
+The flat-file backend uses git for sync instead of Dolt remotes.
+
+With --reverse, migrate a flat-file workspace back to embedded Dolt — the
+escape hatch for teams that hit the flat-file scale or merge ceiling. The
+same data is carried in both directions via the portable import path used
+by 'bd import'. Audit events are not transferred in either direction (no
+backend exposes an event-import API); each backend records a fresh created
+event at migration time. The source backend's files are left in place so
+either migration can be retried, and can be removed afterwards.`,
 	RunE: func(cmd *cobra.Command, _ []string) error {
 		dryRun, _ := cmd.Flags().GetBool("dry-run")
+		reverse, _ := cmd.Flags().GetBool("reverse")
 
 		if !dryRun {
 			CheckReadonly("migrate flatfile")
@@ -32,6 +43,10 @@ The flat-file backend uses git for sync instead of Dolt remotes.`,
 		beadsDir := beads.FindBeadsDir()
 		if beadsDir == "" {
 			return HandleError("no .beads directory found; run 'bd init' first")
+		}
+
+		if reverse {
+			return runFlatfileReverseMigration(beadsDir, dryRun)
 		}
 
 		// Check we're not already flatfile.
@@ -50,7 +65,7 @@ The flat-file backend uses git for sync instead of Dolt remotes.`,
 			if err != nil {
 				return HandleError("no database connection: %v\nIs Dolt running? Try: BD_IGNORE_SCHEMA_SKEW=1 bd migrate flatfile", err)
 			}
-			defer s.Close()
+			defer func() { _ = s.Close() }()
 		}
 		ctx := context.Background()
 
@@ -114,7 +129,9 @@ The flat-file backend uses git for sync instead of Dolt remotes.`,
 				continue
 			}
 			for _, c := range comments {
-				if _, err := ffStore.ImportIssueComment(ctx, c.IssueID, c.Author, c.Text, c.CreatedAt); err != nil {
+				// ImportComment (not ImportIssueComment) so the Dolt comment ID
+				// survives: a later --reverse migration must round-trip losslessly.
+				if err := ffStore.ImportComment(ctx, c); err != nil {
 					fmt.Fprintf(os.Stderr, "Warning: failed to migrate comment on %s: %v\n", c.IssueID, err)
 					continue
 				}
@@ -176,7 +193,165 @@ The flat-file backend uses git for sync instead of Dolt remotes.`,
 	},
 }
 
+// runFlatfileReverseMigration converts a flat-file workspace back to embedded
+// Dolt. The read side hydrates issues exactly as 'bd export' does (bulk label,
+// dependency, and comment getters); the write side is importIssuesCore — the
+// same batch import behind 'bd import' and bootstrap restore — so field
+// fidelity is covered by the existing import/export round-trip guarantees
+// instead of a bespoke copy loop. Config KV is copied in full (issue_prefix,
+// memories, custom keys). Metadata slots ride the issues' metadata column.
+// Audit events are not transferred: no backend exposes an event-import API
+// (events are transaction-scoped side effects of mutations), and the forward
+// migration does not carry them either.
+func runFlatfileReverseMigration(beadsDir string, dryRun bool) error {
+	if !flatfile.IsFlatFileBackend(beadsDir) {
+		return HandleError("not using the flat-file backend; 'bd migrate flatfile --reverse' converts a flat-file workspace back to Dolt")
+	}
+	ctx := context.Background()
+
+	// PersistentPreRun opened the flat-file store (metadata says flatfile).
+	src := getStore()
+	if src == nil {
+		var err error
+		src, err = flatfile.OpenStore(ctx, beadsDir)
+		if err != nil {
+			return HandleError("failed to open flat-file store: %v", err)
+		}
+		defer func() { _ = src.Close() }()
+	}
+
+	issues, err := src.SearchIssues(ctx, "", types.IssueFilter{})
+	if err != nil {
+		return HandleError("failed to list issues: %v", err)
+	}
+
+	issueIDs := make([]string, len(issues))
+	for i, issue := range issues {
+		issueIDs[i] = issue.ID
+	}
+	labelsMap, err := src.GetLabelsForIssues(ctx, issueIDs)
+	if err != nil {
+		return HandleError("failed to load labels: %v", err)
+	}
+	depsMap, err := src.GetDependencyRecordsForIssues(ctx, issueIDs)
+	if err != nil {
+		return HandleError("failed to load dependencies: %v", err)
+	}
+	commentsMap, err := src.GetCommentsForIssues(ctx, issueIDs)
+	if err != nil {
+		return HandleError("failed to load comments: %v", err)
+	}
+	commentCount := 0
+	for _, issue := range issues {
+		issue.Labels = labelsMap[issue.ID]
+		issue.Dependencies = depsMap[issue.ID]
+		issue.Comments = commentsMap[issue.ID]
+		commentCount += len(issue.Comments)
+		sanitizeZeroTime(issue)
+	}
+
+	allConfig, err := src.GetAllConfig(ctx)
+	if err != nil {
+		return HandleError("failed to read config: %v", err)
+	}
+
+	fmt.Printf("Found %d issues, %d comments, and %d config entries to migrate.\n",
+		len(issues), commentCount, len(allConfig))
+	if dryRun {
+		fmt.Println("Dry run — no changes made.")
+		return nil
+	}
+
+	// Derive the Dolt database name the way bd init does: an existing
+	// metadata dolt_database wins, then the issue prefix, then the default.
+	dbName := configfile.DefaultDoltDatabase
+	if cfg, _ := configfile.Load(beadsDir); cfg != nil && cfg.DoltDatabase != "" {
+		dbName = cfg.DoltDatabase
+	} else if prefix := allConfig["issue_prefix"]; prefix != "" {
+		if derived := dbNameFromPrefix(normalizeIssuePrefix(prefix)); dolt.ValidateDatabaseName(derived) == nil {
+			dbName = derived
+		}
+	}
+
+	// Flip metadata.json to the Dolt backend before opening the store —
+	// newDoltStoreFromConfig routes on it. Keep the original bytes so any
+	// failure below restores the workspace to flat-file untouched.
+	metaPath := filepath.Join(beadsDir, "metadata.json")
+	origMeta, err := os.ReadFile(metaPath)
+	if err != nil {
+		return HandleError("failed to read metadata.json: %v", err)
+	}
+	var meta map[string]interface{}
+	if err := json.Unmarshal(origMeta, &meta); err != nil {
+		meta = make(map[string]interface{})
+	}
+	meta["backend"] = configfile.BackendDolt
+	meta["dolt_database"] = dbName
+	newMeta, err := json.MarshalIndent(meta, "", "  ")
+	if err != nil {
+		return HandleError("failed to encode metadata.json: %v", err)
+	}
+	newMeta = append(newMeta, '\n')
+	if err := os.WriteFile(metaPath, newMeta, 0o644); err != nil {
+		return HandleError("failed to update metadata.json: %v", err)
+	}
+	restoreMeta := func() {
+		if err := os.WriteFile(metaPath, origMeta, 0o644); err != nil {
+			fmt.Fprintf(os.Stderr, "Warning: failed to restore metadata.json: %v\n", err)
+		}
+	}
+
+	dst, err := newDoltStoreFromConfig(ctx, beadsDir)
+	if err != nil {
+		restoreMeta()
+		return HandleError("failed to open Dolt store: %v", err)
+	}
+
+	// AllowStale: the flat-file data is the source of truth, even over rows
+	// in a leftover pre-migration Dolt directory.
+	result, err := importIssuesCore(ctx, "", dst, issues, ImportOptions{
+		SkipPrefixValidation: true,
+		AllowStale:           true,
+	})
+	if err != nil {
+		_ = dst.Close()
+		restoreMeta()
+		return HandleError("failed to import issues into Dolt: %v", err)
+	}
+	for _, skipped := range result.SkippedDependencies {
+		fmt.Fprintf(os.Stderr, "Warning: skipped dependency %s\n", skipped)
+	}
+	fmt.Printf("Migrated %d/%d issues and %d comments.\n", result.Created, len(issues), commentCount)
+
+	configErrs := 0
+	for k, v := range allConfig {
+		if err := dst.SetConfig(ctx, k, v); err != nil {
+			fmt.Fprintf(os.Stderr, "Warning: failed to migrate config %s: %v\n", k, err)
+			configErrs++
+		}
+	}
+	fmt.Printf("Migrated %d config entries.\n", len(allConfig)-configErrs)
+
+	if err := dst.Close(); err != nil {
+		fmt.Fprintf(os.Stderr, "Warning: failed to close Dolt store: %v\n", err)
+	}
+
+	// Restore the Dolt-backend .gitignore (the flat-file one stopped ignoring
+	// the Dolt data directories).
+	gitignorePath := filepath.Join(beadsDir, ".gitignore")
+	if err := os.WriteFile(gitignorePath, []byte(doctor.GitignoreTemplate), 0o644); err != nil {
+		fmt.Fprintf(os.Stderr, "Warning: failed to update .gitignore: %v\n", err)
+	}
+
+	fmt.Println("\nMigration complete. The Dolt backend is now active.")
+	fmt.Println("The flat-file data is no longer used and can be removed:")
+	fmt.Printf("  rm -rf %s/issues %s/comments %s/events %s/config_kv.json\n",
+		beadsDir, beadsDir, beadsDir, beadsDir)
+	return nil
+}
+
 func init() {
 	migrateFlatfileCmd.Flags().Bool("dry-run", false, "Show what would be migrated without making changes")
+	migrateFlatfileCmd.Flags().Bool("reverse", false, "Migrate a flat-file workspace back to embedded Dolt")
 	migrateCmd.AddCommand(migrateFlatfileCmd)
 }
