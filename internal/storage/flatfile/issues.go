@@ -250,19 +250,9 @@ func (s *FlatFileStore) CreateIssue(ctx context.Context, issue *types.Issue, act
 		return fmt.Errorf("flatfile: issue %s already exists", issue.ID)
 	}
 
-	now := time.Now().UTC()
-	if issue.CreatedAt.IsZero() {
-		issue.CreatedAt = now
-	}
-	if issue.UpdatedAt.IsZero() {
-		issue.UpdatedAt = now
-	}
-	if issue.CreatedBy == "" {
-		issue.CreatedBy = actor
-	}
-	if issue.Status == "" {
-		issue.Status = types.StatusOpen
-	}
+	// Shared with the batch path: timestamp/status defaults and closed_at
+	// derivation (mirrors issueops.PrepareIssueForInsert).
+	prepareIssueDefaults(issue, actor)
 
 	if err := s.writeIssue(issue); err != nil {
 		return err
@@ -279,16 +269,6 @@ func (s *FlatFileStore) CreateIssue(ctx context.Context, issue *types.Issue, act
 		}
 		seen[label] = struct{}{}
 		if err := s.recordCommentEvent(issue.ID, issueops.IsWisp(issue), types.EventLabelAdded, actor, "Added label: "+label); err != nil {
-			return err
-		}
-	}
-	return nil
-}
-
-// CreateIssues creates multiple issues in sequence.
-func (s *FlatFileStore) CreateIssues(ctx context.Context, issues []*types.Issue, actor string) error {
-	for _, issue := range issues {
-		if err := s.CreateIssue(ctx, issue, actor); err != nil {
 			return err
 		}
 	}

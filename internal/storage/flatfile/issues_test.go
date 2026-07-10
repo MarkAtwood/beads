@@ -65,6 +65,11 @@ func TestCreateIssueDuplicate(t *testing.T) {
 func TestCreateIssues(t *testing.T) {
 	s := newTestStore(t)
 
+	// CreateIssues mirrors sqlkit and validates ID prefixes against config.
+	if err := s.SetConfig(ctx, "issue_prefix", "batch"); err != nil {
+		t.Fatalf("SetConfig: %v", err)
+	}
+
 	issues := []*types.Issue{
 		{ID: "batch-1", Title: "First"},
 		{ID: "batch-2", Title: "Second"},

@@ -1,0 +1,525 @@
+package flatfile
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"time"
+
+	"github.com/steveyegge/beads/internal/storage"
+	"github.com/steveyegge/beads/internal/storage/issueops"
+	"github.com/steveyegge/beads/internal/types"
+)
+
+// This file implements batch issue creation, mirroring
+// issueops.CreateIssuesInTxWithResult. The SQL backends get all-or-nothing
+// semantics from transaction rollback; the flat-file store has no rollback
+// (writes are per-file), so the ENTIRE batch is validated in memory first and
+// files are only written once no batch-aborting error remains.
+
+// plannedIssue is the write-phase plan for one input issue.
+type plannedIssue struct {
+	final     *types.Issue        // issue JSON to write (nil when nothing is written)
+	incoming  *types.Issue        // the caller's issue (source of deps/comments)
+	isNew     bool                // records a 'created' event
+	addLabels []string            // labels genuinely added (one label_added event each)
+	stale     bool                // RejectStaleUpserts kept the stored row; aux skipped
+	deps      []*types.Dependency // inline edges to validate in the dependency pass
+}
+
+// CreateIssuesWithFullOptions creates a batch of issues with import-grade
+// options. Mirrors sqlkit.CreateIssuesWithFullOptions + issueops
+// CreateIssuesInTxWithResult: cross-bucket in-batch edges are rejected (or
+// dropped and reported), existing rows follow upsert/ConflictSkip/
+// RejectStaleUpserts semantics, hierarchical orphans follow OrphanHandling,
+// and inline dependencies are persisted in a batch pass that skips missing
+// targets and rejects self-dependencies and blocking cycles.
+func (s *FlatFileStore) CreateIssuesWithFullOptions(ctx context.Context, issues []*types.Issue, actor string, opts storage.BatchCreateOptions) error {
+	if err := s.checkClosed(); err != nil {
+		return err
+	}
+	if len(issues) == 0 {
+		return nil
+	}
+
+	// All-wisp batches force Ephemeral (mirrors sqlkit).
+	if issueops.AllWisps(issues) {
+		for _, issue := range issues {
+			if !issue.NoHistory {
+				issue.Ephemeral = true
+			}
+		}
+	}
+
+	filtered, err := filterMixedBucketDependencies(issues, opts)
+	if err != nil {
+		return err
+	}
+
+	configPrefix, _ := s.GetConfig(ctx, "issue_prefix")
+	allowedPrefixes, _ := s.GetConfig(ctx, "allowed_prefixes")
+
+	// planned holds the final state of every batch-written issue, keyed by ID,
+	// so later batch members see earlier ones (parents, dep targets).
+	planned := make(map[string]*types.Issue)
+	var plans []*plannedIssue
+
+	for _, issue := range filtered {
+		if issue == nil {
+			continue
+		}
+		prepareIssueDefaults(issue, actor)
+
+		if issue.ID == "" {
+			prefix := configPrefix
+			if prefix == "" {
+				return fmt.Errorf("flatfile: cannot generate ID: issue_prefix not configured")
+			}
+			if issue.PrefixOverride != "" {
+				prefix = issue.PrefixOverride
+			} else if issue.IDPrefix != "" {
+				prefix = prefix + "-" + issue.IDPrefix
+			} else if issueops.IsWisp(issue) {
+				prefix = prefix + "-wisp"
+			}
+			id, err := s.generateID(prefix, issue, actor)
+			if err != nil {
+				return err
+			}
+			if planned[id] != nil {
+				return fmt.Errorf("flatfile: generated ID %s collides within batch", id)
+			}
+			issue.ID = id
+		} else if !opts.SkipPrefixValidation {
+			if err := issueops.ValidateIssueIDPrefix(issue.ID, configPrefix, allowedPrefixes); err != nil {
+				return fmt.Errorf("prefix validation failed for %s: %w", issue.ID, err)
+			}
+		}
+
+		// Orphan handling for hierarchical IDs (mirrors issueops.CheckOrphan).
+		if skip, err := s.checkBatchOrphan(issue, planned, opts.OrphanHandling); err != nil {
+			return err
+		} else if skip {
+			plans = append(plans, &plannedIssue{incoming: issue})
+			continue
+		}
+
+		stored, err := s.batchStoredIssue(issue.ID, planned)
+		if err != nil {
+			return err
+		}
+
+		plan := &plannedIssue{incoming: issue, deps: issue.Dependencies}
+		switch {
+		case stored == nil:
+			final := *issue
+			final.Dependencies = nil
+			final.Labels = dedupeLabels(issue.Labels)
+			plan.final = &final
+			plan.isNew = true
+			plan.addLabels = final.Labels
+		case opts.ConflictSkip:
+			// Row untouched; aux (labels) still merges additively.
+			plan.final, plan.addLabels = mergeLabels(stored, issue.Labels)
+		case opts.RejectStaleUpserts && stored.UpdatedAt.After(issue.UpdatedAt):
+			// Stored row strictly newer: reject, and keep the snapshot's aux
+			// data (labels/comments/deps) out of the batch too (bd-578h9.8).
+			plan.stale = true
+			plan.deps = nil
+		case opts.RejectStaleUpserts && !issue.UpdatedAt.After(stored.UpdatedAt):
+			// Same-second tie: the stored columns win, aux merges additively.
+			plan.final, plan.addLabels = mergeLabels(stored, issue.Labels)
+		default:
+			// Plain upsert: incoming columns win; stored aux merges additively.
+			final := *issue
+			final.Dependencies = stored.Dependencies
+			final.Labels, plan.addLabels = unionLabels(stored.Labels, issue.Labels)
+			plan.final = &final
+		}
+
+		if plan.final != nil {
+			planned[issue.ID] = plan.final
+		}
+		plans = append(plans, plan)
+	}
+
+	extraDeps, err := s.planBatchDependencies(plans, planned, actor, opts)
+	if err != nil {
+		return err
+	}
+
+	// Write phase: validation passed, nothing can abort the batch now.
+	for _, plan := range plans {
+		if plan.stale {
+			if opts.OnStaleRejected != nil {
+				opts.OnStaleRejected(plan.incoming.ID)
+			}
+			continue
+		}
+		if plan.final == nil {
+			continue // orphan-skipped
+		}
+		if err := s.writeIssue(plan.final); err != nil {
+			return err
+		}
+		if plan.isNew {
+			if err := s.recordEvent(plan.final.ID, types.EventCreated, actor, "", ""); err != nil {
+				return err
+			}
+		}
+		for _, label := range plan.addLabels {
+			if err := s.recordCommentEvent(plan.final.ID, issueops.IsWisp(plan.final), types.EventLabelAdded, actor, "Added label: "+label); err != nil {
+				return err
+			}
+		}
+		for _, comment := range plan.incoming.Comments {
+			createdAt := comment.CreatedAt
+			if createdAt.IsZero() {
+				createdAt = time.Now().UTC()
+			}
+			if _, err := s.ImportIssueComment(ctx, plan.final.ID, comment.Author, comment.Text, createdAt); err != nil {
+				return err
+			}
+		}
+	}
+	// Edges whose source is outside the batch: read-modify-write.
+	for sourceID, deps := range extraDeps {
+		issue, err := s.readIssue(sourceID)
+		if err != nil {
+			return err
+		}
+		issue.Dependencies = append(issue.Dependencies, deps...)
+		if err := s.writeIssue(issue); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// CreateIssues creates multiple issues with default batch options
+// (mirrors sqlkit.Store.CreateIssues).
+func (s *FlatFileStore) CreateIssues(ctx context.Context, issues []*types.Issue, actor string) error {
+	return s.CreateIssuesWithFullOptions(ctx, issues, actor, storage.BatchCreateOptions{
+		OrphanHandling: storage.OrphanAllow,
+	})
+}
+
+// prepareIssueDefaults mirrors the normalization half of
+// issueops.PrepareIssueForInsert plus flatfile's CreatedBy default.
+func prepareIssueDefaults(issue *types.Issue, actor string) {
+	now := time.Now().UTC()
+	if issue.CreatedAt.IsZero() {
+		issue.CreatedAt = now
+	} else {
+		issue.CreatedAt = issue.CreatedAt.UTC()
+	}
+	if issue.UpdatedAt.IsZero() {
+		issue.UpdatedAt = now
+	} else {
+		issue.UpdatedAt = issue.UpdatedAt.UTC()
+	}
+	if issue.CreatedBy == "" {
+		issue.CreatedBy = actor
+	}
+	if issue.Status == "" {
+		issue.Status = types.StatusOpen
+	}
+	// Ensure closed issues have a closed_at timestamp.
+	if issue.Status == types.StatusClosed && issue.ClosedAt == nil {
+		maxTime := issue.CreatedAt
+		if issue.UpdatedAt.After(maxTime) {
+			maxTime = issue.UpdatedAt
+		}
+		closedAt := maxTime.Add(time.Second)
+		issue.ClosedAt = &closedAt
+	}
+}
+
+// batchStoredIssue resolves the current state of an ID: an earlier batch
+// member's planned write wins over the on-disk file.
+func (s *FlatFileStore) batchStoredIssue(id string, planned map[string]*types.Issue) (*types.Issue, error) {
+	if p, ok := planned[id]; ok {
+		return p, nil
+	}
+	stored, err := s.readIssue(id)
+	if err != nil {
+		if errors.Is(err, storage.ErrNotFound) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	return stored, nil
+}
+
+// checkBatchOrphan mirrors issueops.CheckOrphan: a hierarchical ID whose
+// parent exists neither on disk nor earlier in the batch errors under
+// OrphanStrict, is skipped under OrphanSkip, and proceeds otherwise.
+func (s *FlatFileStore) checkBatchOrphan(issue *types.Issue, planned map[string]*types.Issue, handling storage.OrphanHandling) (skip bool, err error) {
+	if issue.ID == "" {
+		return false, nil
+	}
+	parentID, _, ok := issueops.ParseHierarchicalID(issue.ID)
+	if !ok {
+		return false, nil
+	}
+	if planned[parentID] != nil {
+		return false, nil
+	}
+	if _, err := s.readIssue(parentID); err == nil {
+		return false, nil
+	} else if !errors.Is(err, storage.ErrNotFound) {
+		return false, err
+	}
+	switch handling {
+	case storage.OrphanStrict:
+		return false, fmt.Errorf("parent issue %s does not exist (strict mode)", parentID)
+	case storage.OrphanSkip:
+		return true, nil
+	default: // OrphanAllow, OrphanResurrect
+		return false, nil
+	}
+}
+
+// planBatchDependencies validates every inline dependency against the
+// simulated post-batch state (mirrors issueops.PersistDependencies...):
+// missing targets are skipped and reported; self-dependencies and blocking
+// cycles abort the batch unless SkipDependencyValidationErrors drops them.
+// Validated edges are appended to their planned source, or returned keyed by
+// source ID when the source is outside the batch.
+func (s *FlatFileStore) planBatchDependencies(plans []*plannedIssue, planned map[string]*types.Issue, actor string, opts storage.BatchCreateOptions) (map[string][]*types.Dependency, error) {
+	disk, err := s.loadAllIssues()
+	if err != nil {
+		return nil, err
+	}
+	// Simulated post-batch issue set: planned writes shadow disk files.
+	combined := make([]*types.Issue, 0, len(disk)+len(planned))
+	for _, issue := range disk {
+		if planned[issue.ID] == nil {
+			combined = append(combined, issue)
+		}
+	}
+	for _, issue := range planned {
+		combined = append(combined, issue)
+	}
+
+	exists := make(map[string]bool, len(combined))
+	edges := make(map[string]map[string]bool)
+	adj := make(map[string][]string)
+	for _, issue := range combined {
+		exists[issue.ID] = true
+		for _, dep := range issue.Dependencies {
+			if edges[issue.ID] == nil {
+				edges[issue.ID] = make(map[string]bool)
+			}
+			edges[issue.ID][dep.DependsOnID] = true
+			if isBlockingDepType(dep.Type) {
+				adj[issue.ID] = append(adj[issue.ID], dep.DependsOnID)
+			}
+		}
+	}
+
+	extra := make(map[string][]*types.Dependency)
+	for _, plan := range plans {
+		if plan.stale || plan.final == nil {
+			continue // stale or orphan-skipped: its edges stay out of the batch
+		}
+		for _, dep := range plan.deps {
+			if dep == nil {
+				continue
+			}
+			if dep.IssueID == "" {
+				dep.IssueID = plan.incoming.ID
+			}
+			if !isExternalDepTarget(dep.DependsOnID) && !exists[dep.DependsOnID] {
+				if opts.OnSkippedDependency != nil {
+					opts.OnSkippedDependency(dep.IssueID, dep.DependsOnID, "target not found")
+				}
+				continue
+			}
+			if edges[dep.IssueID][dep.DependsOnID] {
+				continue // duplicate edge: ON DUPLICATE KEY no-op
+			}
+			if cycleErr := checkBatchDependencyCycle(adj, dep); cycleErr != nil {
+				if opts.SkipDependencyValidationErrors {
+					if opts.OnSkippedDependency != nil {
+						opts.OnSkippedDependency(dep.IssueID, dep.DependsOnID, cycleErr.Error())
+					}
+					continue
+				}
+				return nil, fmt.Errorf("invalid dependency %s -> %s: %w", dep.IssueID, dep.DependsOnID, cycleErr)
+			}
+
+			if dep.Metadata == "" {
+				dep.Metadata = "{}"
+			}
+			if dep.CreatedAt.IsZero() {
+				dep.CreatedAt = time.Now().UTC()
+			}
+			if dep.CreatedBy == "" {
+				dep.CreatedBy = actor
+			}
+			if target, ok := planned[dep.IssueID]; ok {
+				target.Dependencies = append(target.Dependencies, dep)
+			} else {
+				extra[dep.IssueID] = append(extra[dep.IssueID], dep)
+			}
+			if edges[dep.IssueID] == nil {
+				edges[dep.IssueID] = make(map[string]bool)
+			}
+			edges[dep.IssueID][dep.DependsOnID] = true
+			if isBlockingDepType(dep.Type) {
+				adj[dep.IssueID] = append(adj[dep.IssueID], dep.DependsOnID)
+			}
+		}
+	}
+	return extra, nil
+}
+
+// checkBatchDependencyCycle mirrors issueops.CheckDependencyCycleInTx against
+// the simulated batch graph.
+func checkBatchDependencyCycle(adj map[string][]string, dep *types.Dependency) error {
+	if dep.IssueID == dep.DependsOnID {
+		return fmt.Errorf("cannot add self-dependency: %s cannot depend on itself", dep.IssueID)
+	}
+	if !isBlockingDepType(dep.Type) {
+		return nil
+	}
+	if reachable(adj, dep.DependsOnID, dep.IssueID) {
+		return fmt.Errorf("adding dependency would create a cycle")
+	}
+	return nil
+}
+
+// filterMixedBucketDependencies mirrors
+// issueops.filterCreateIssuesMixedBucketDependencies: a batch containing both
+// regular issues and wisps may not carry an in-batch cross-bucket edge; with
+// SkipDependencyValidationErrors the edge is dropped and reported instead.
+func filterMixedBucketDependencies(issues []*types.Issue, opts storage.BatchCreateOptions) ([]*types.Issue, error) {
+	batchWispByID := make(map[string]bool, len(issues))
+	hasRegular := false
+	hasWisp := false
+	for _, issue := range issues {
+		if issue == nil {
+			continue
+		}
+		isWisp := issueops.IsWisp(issue)
+		if isWisp {
+			hasWisp = true
+		} else {
+			hasRegular = true
+		}
+		if issue.ID != "" {
+			batchWispByID[issue.ID] = isWisp
+		}
+	}
+	if !hasRegular || !hasWisp {
+		return issues, nil
+	}
+
+	var filtered []*types.Issue
+	for i, issue := range issues {
+		if issue == nil {
+			continue
+		}
+		var kept []*types.Dependency
+		dropped := false
+		for j, dep := range issue.Dependencies {
+			if dep == nil {
+				if dropped {
+					kept = append(kept, dep)
+				}
+				continue
+			}
+			sourceID := issue.ID
+			sourceIsWisp := issueops.IsWisp(issue)
+			if dep.IssueID != "" {
+				sourceID = dep.IssueID
+				if isWisp, ok := batchWispByID[sourceID]; ok {
+					sourceIsWisp = isWisp
+				}
+			}
+			targetIsWisp, targetInBatch := batchWispByID[dep.DependsOnID]
+			if targetInBatch && sourceIsWisp != targetIsWisp {
+				if !opts.SkipDependencyValidationErrors {
+					return nil, fmt.Errorf("mixed regular/wisp CreateIssues batch cannot include cross-bucket dependency %s -> %s; create the issues first, then add the in-batch dependency after both issues exist", sourceID, dep.DependsOnID)
+				}
+				if !dropped {
+					kept = append([]*types.Dependency(nil), issue.Dependencies[:j]...)
+					dropped = true
+				}
+				if opts.OnSkippedDependency != nil {
+					opts.OnSkippedDependency(sourceID, dep.DependsOnID, "cross-bucket dependency between regular issue and wisp in the same batch")
+				}
+				continue
+			}
+			if dropped {
+				kept = append(kept, dep)
+			}
+		}
+		if dropped {
+			if filtered == nil {
+				filtered = append([]*types.Issue(nil), issues...)
+			}
+			issueCopy := *issue
+			issueCopy.Dependencies = kept
+			filtered[i] = &issueCopy
+		}
+	}
+	if filtered != nil {
+		return filtered, nil
+	}
+	return issues, nil
+}
+
+// dedupeLabels returns labels with duplicates removed, preserving order.
+func dedupeLabels(labels []string) []string {
+	if len(labels) == 0 {
+		return nil
+	}
+	seen := make(map[string]struct{}, len(labels))
+	out := make([]string, 0, len(labels))
+	for _, l := range labels {
+		if _, ok := seen[l]; ok {
+			continue
+		}
+		seen[l] = struct{}{}
+		out = append(out, l)
+	}
+	return out
+}
+
+// mergeLabels merges incoming labels into a copy of the stored issue,
+// returning the copy and the labels genuinely added.
+func mergeLabels(stored *types.Issue, incoming []string) (*types.Issue, []string) {
+	final := *stored
+	merged, added := unionLabels(stored.Labels, incoming)
+	final.Labels = merged
+	return &final, added
+}
+
+// unionLabels returns stored ∪ incoming (order-preserving, deduped) and the
+// incoming labels that were not already stored.
+func unionLabels(stored, incoming []string) ([]string, []string) {
+	seen := make(map[string]struct{}, len(stored)+len(incoming))
+	merged := make([]string, 0, len(stored)+len(incoming))
+	for _, l := range stored {
+		if _, ok := seen[l]; ok {
+			continue
+		}
+		seen[l] = struct{}{}
+		merged = append(merged, l)
+	}
+	var added []string
+	for _, l := range incoming {
+		if _, ok := seen[l]; ok {
+			continue
+		}
+		seen[l] = struct{}{}
+		merged = append(merged, l)
+		added = append(added, l)
+	}
+	if len(merged) == 0 {
+		return nil, added
+	}
+	return merged, added
+}
