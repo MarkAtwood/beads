@@ -13,12 +13,76 @@ import (
 	"strings"
 	"time"
 
+	"github.com/steveyegge/beads/internal/storage/issueops"
 	"github.com/steveyegge/beads/internal/types"
 )
 
 // eventFilename returns the JSONL events file path for an issue.
 func (s *FlatFileStore) eventFilename(issueID string) string {
 	return filepath.Join(s.eventsDir, issueID+".jsonl")
+}
+
+// appendEvent appends a single event to the issue's JSONL events file,
+// generating an ID and timestamp when absent. This is the flat-file
+// counterpart of the events/wisp_events INSERTs in issueops.
+func (s *FlatFileStore) appendEvent(ev *types.Event) error {
+	if ev.ID == "" {
+		ev.ID = issueops.NewEventID()
+	}
+	if ev.CreatedAt.IsZero() {
+		ev.CreatedAt = time.Now().UTC()
+	}
+	path, err := s.safeEventFilename(ev.IssueID)
+	if err != nil {
+		return err
+	}
+	data, err := json.Marshal(ev)
+	if err != nil {
+		return fmt.Errorf("flatfile: marshal event: %w", err)
+	}
+	data = append(data, '\n')
+	f, err := os.OpenFile(path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
+	if err != nil {
+		return fmt.Errorf("flatfile: open events for append: %w", err)
+	}
+	if _, err := f.Write(data); err != nil {
+		_ = f.Close()
+		return fmt.Errorf("flatfile: append event: %w", err)
+	}
+	if err := f.Close(); err != nil {
+		return fmt.Errorf("flatfile: close events: %w", err)
+	}
+	return nil
+}
+
+// recordEvent mirrors issueops.RecordEventInTable/RecordFullEventInTable:
+// old_value and new_value are written explicitly (possibly empty, never NULL).
+func (s *FlatFileStore) recordEvent(issueID string, eventType types.EventType, actor, oldValue, newValue string) error {
+	return s.appendEvent(&types.Event{
+		IssueID:   issueID,
+		EventType: eventType,
+		Actor:     actor,
+		OldValue:  &oldValue,
+		NewValue:  &newValue,
+	})
+}
+
+// recordCommentEvent mirrors the label/comment event INSERTs, which leave
+// old_value/new_value unwritten: NULL on durable issues (events table has no
+// DEFAULT) but empty-string on wisps (wisp_events columns DEFAULT '').
+func (s *FlatFileStore) recordCommentEvent(issueID string, isWisp bool, eventType types.EventType, actor, comment string) error {
+	ev := &types.Event{
+		IssueID:   issueID,
+		EventType: eventType,
+		Actor:     actor,
+		Comment:   &comment,
+	}
+	if isWisp {
+		empty := ""
+		ev.OldValue = &empty
+		ev.NewValue = &empty
+	}
+	return s.appendEvent(ev)
 }
 
 // safeEventFilename validates the issue ID before constructing the path.
@@ -70,7 +134,8 @@ func (s *FlatFileStore) GetAllEventsSince(_ context.Context, since time.Time) ([
 			return nil, err
 		}
 		for _, ev := range events {
-			if !ev.CreatedAt.Before(since) {
+			// Strict boundary, mirroring issueops' `created_at > ?`.
+			if ev.CreatedAt.After(since) {
 				result = append(result, ev)
 			}
 		}
