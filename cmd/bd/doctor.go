@@ -198,7 +198,9 @@ Examples:
 		if beadsDir := doctor.ResolveBeadsDirForRepo("."); doctor.IsFlatfileBackend(beadsDir) {
 			result := runDiagnostics(".")
 			if jsonOutput {
-				exportDiagnostics(result, "")
+				if err := exportDiagnostics(result, ""); err != nil {
+					return HandleError("failed to export diagnostics: %v", err)
+				}
 			} else {
 				printDiagnostics(result)
 			}
