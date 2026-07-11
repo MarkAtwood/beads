@@ -689,7 +689,9 @@ func (s *FlatFileStore) CloseIssue(_ context.Context, id string, reason string, 
 }
 
 // DeleteIssue removes an issue file from disk, along with its events file and
-// comments directory (comments/events FK ON DELETE CASCADE parity).
+// comments directory (comments/events FK ON DELETE CASCADE parity). Dependency
+// edges in surviving issues that point at the deleted issue are dropped,
+// mirroring fk_dep_issue_target ON DELETE CASCADE in the SQL reference.
 func (s *FlatFileStore) DeleteIssue(_ context.Context, id string) error {
 	if err := s.checkClosed(); err != nil {
 		return err
@@ -699,7 +701,14 @@ func (s *FlatFileStore) DeleteIssue(_ context.Context, id string) error {
 	if err := s.removeIssueFile(id); err != nil {
 		return err
 	}
-	return s.removeIssueChildFiles(id)
+	if err := s.removeIssueChildFiles(id); err != nil {
+		return err
+	}
+	all, err := s.loadAllIssues()
+	if err != nil {
+		return err
+	}
+	return s.removeDanglingEdges(all, map[string]bool{id: true})
 }
 
 // applyUpdates applies a map of field name → value to an issue struct.

@@ -83,3 +83,36 @@ func TestDeleteIssuesBySourceRepoCascadesChildFiles(t *testing.T) {
 	assertChildren(t, s, "bd-1", false)
 	assertChildren(t, s, "bd-2", true) // other repo untouched
 }
+
+// Oracle: fk_dep_issue_target ON DELETE CASCADE — a single-row DELETE in the
+// SQL reference removes inbound dependency edges automatically, so a survivor
+// must not keep an edge to the deleted issue.
+func TestDeleteIssueRemovesDanglingEdges(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+
+	if err := s.CreateIssue(ctx, &types.Issue{ID: "bd-src", Title: "survivor"}, "a"); err != nil {
+		t.Fatalf("CreateIssue bd-src: %v", err)
+	}
+	if err := s.CreateIssue(ctx, &types.Issue{ID: "bd-tgt", Title: "target"}, "a"); err != nil {
+		t.Fatalf("CreateIssue bd-tgt: %v", err)
+	}
+	dep := &types.Dependency{IssueID: "bd-src", DependsOnID: "bd-tgt", Type: "blocks"}
+	if err := s.AddDependency(ctx, dep, "a"); err != nil {
+		t.Fatalf("AddDependency: %v", err)
+	}
+
+	if err := s.DeleteIssue(ctx, "bd-tgt"); err != nil {
+		t.Fatalf("DeleteIssue: %v", err)
+	}
+
+	survivor, err := s.GetIssue(ctx, "bd-src")
+	if err != nil {
+		t.Fatalf("GetIssue bd-src: %v", err)
+	}
+	for _, d := range survivor.Dependencies {
+		if d.DependsOnID == "bd-tgt" {
+			t.Fatalf("survivor still has edge to deleted issue: %+v", d)
+		}
+	}
+}
