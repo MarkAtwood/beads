@@ -396,12 +396,21 @@ func (s *FlatFileStore) DeleteIssues(_ context.Context, ids []string, cascade bo
 		result.OrphanedIssues = orphans
 	}
 
-	// Cascade can pull wisp dependents into the set; re-partition.
+	// Cascade can pull wisp dependents into the set; re-partition. A wisp
+	// passed in ids AND rediscovered by the cascade BFS must not enter
+	// cascadeWispIDs a second time: the SQL reference re-adds it and then
+	// aborts the whole batch when the duplicate delete hits 0 rows (its own
+	// bug); deduping here keeps DeletedCount equal to the number of issues
+	// that actually existed.
+	initialWispSet := makeStringSet(initialWispIDs)
 	var cascadeWispIDs, finalRegularIDs []string
 	for _, id := range expandedRegularIDs {
-		if isStoredWisp(id) {
+		switch {
+		case initialWispSet[id]:
+			// already queued via ids
+		case isStoredWisp(id):
 			cascadeWispIDs = append(cascadeWispIDs, id)
-		} else {
+		default:
 			finalRegularIDs = append(finalRegularIDs, id)
 		}
 	}
