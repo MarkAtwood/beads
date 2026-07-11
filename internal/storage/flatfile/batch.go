@@ -103,12 +103,12 @@ func (s *FlatFileStore) CreateIssuesWithFullOptions(ctx context.Context, issues 
 			} else if issueops.IsWisp(issue) {
 				prefix = prefix + "-wisp"
 			}
-			id, err := s.generateID(ctx, prefix, issue, actor)
+			// planned makes ID generation batch-aware: a candidate claimed by
+			// an earlier batch member advances the nonce instead of colliding
+			// (mirrors the SQL in-transaction collision SELECT).
+			id, err := s.generateID(ctx, prefix, issue, actor, planned)
 			if err != nil {
 				return err
-			}
-			if planned[id] != nil {
-				return fmt.Errorf("flatfile: generated ID %s collides within batch", id)
 			}
 			issue.ID = id
 		} else if !opts.SkipPrefixValidation {
