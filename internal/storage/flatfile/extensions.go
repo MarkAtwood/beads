@@ -506,8 +506,12 @@ func (s *FlatFileStore) UpdateIssueID(_ context.Context, oldID, newID string, is
 	if err := s.writeIssue(stored); err != nil {
 		return err
 	}
-	// Remove old issue file only after new file is safely written.
-	_ = os.Remove(s.issueFilename(oldID))
+	// Remove old issue file only after new file is safely written. A failed
+	// removal must surface: reporting success would leave the issue duplicated
+	// under both IDs in every listing.
+	if err := s.removeIssueFile(oldID); err != nil && !errors.Is(err, storage.ErrNotFound) {
+		return fmt.Errorf("flatfile: rename %s to %s: renamed file written but old file not removed: %w", oldID, newID, err)
+	}
 
 	// Rename comments directory if it exists.
 	oldCommentDir := filepath.Join(s.commentsDir, oldID)
@@ -527,10 +531,13 @@ func (s *FlatFileStore) UpdateIssueID(_ context.Context, oldID, newID string, is
 		return err
 	}
 
-	// Update inbound dependency references in all other issues.
+	// Update inbound dependency references in all other issues. The rename
+	// itself already succeeded, but a failed rewrite leaves edges pointing at
+	// the retired ID (which GetDependencies silently drops), so the caller
+	// must hear about it to retry cleanup.
 	all, err := s.loadAllIssues()
 	if err != nil {
-		return nil // best-effort: issue file already renamed
+		return fmt.Errorf("flatfile: rename %s to %s: issue renamed but inbound-edge rescan failed: %w", oldID, newID, err)
 	}
 	for _, other := range all {
 		if other.ID == newID {
@@ -548,7 +555,9 @@ func (s *FlatFileStore) UpdateIssueID(_ context.Context, oldID, newID string, is
 			}
 		}
 		if changed {
-			_ = s.writeIssue(other)
+			if err := s.writeIssue(other); err != nil {
+				return fmt.Errorf("flatfile: rename %s to %s: issue renamed but rewriting inbound edges of %s failed: %w", oldID, newID, other.ID, err)
+			}
 		}
 	}
 	return nil
