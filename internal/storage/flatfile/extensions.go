@@ -982,7 +982,10 @@ func (s *FlatFileStore) GetDependencyRecordsForIssues(_ context.Context, issueID
 	for _, id := range issueIDs {
 		issue, err := s.readIssue(id)
 		if err != nil {
-			continue
+			if errors.Is(err, storage.ErrNotFound) {
+				continue // missing ids simply produce no rows, like SQL IN (...)
+			}
+			return nil, err
 		}
 		result[id] = issue.Dependencies
 	}
@@ -1422,7 +1425,13 @@ func (s *FlatFileStore) GetCommentCounts(_ context.Context, issueIDs []string) (
 	}
 	result := make(map[string]int, len(issueIDs))
 	for _, id := range issueIDs {
-		count, _ := s.countCommentFiles(id)
+		// A missing comments dir counts 0 (readDirSafe), but real I/O errors
+		// must surface — a swallowed error would render count 0 for an issue
+		// that has comments, where the SQL COUNT query fails instead.
+		count, err := s.countCommentFiles(id)
+		if err != nil {
+			return nil, err
+		}
 		result[id] = count
 	}
 	return result, nil
@@ -1451,7 +1460,10 @@ func (s *FlatFileStore) GetLabelsForIssues(_ context.Context, issueIDs []string)
 	for _, id := range issueIDs {
 		issue, err := s.readIssue(id)
 		if err != nil {
-			continue
+			if errors.Is(err, storage.ErrNotFound) {
+				continue // missing ids simply produce no rows, like SQL IN (...)
+			}
+			return nil, err
 		}
 		result[id] = issue.Labels
 	}
