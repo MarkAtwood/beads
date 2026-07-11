@@ -673,8 +673,19 @@ func (s *FlatFileStore) ClaimIssue(ctx context.Context, id string, actor string)
 	return s.writeIssue(issue)
 }
 
+// ClaimReadyIssue claims the first ready issue matching filter. Mirrors
+// issueops.ClaimReadyIssueInTx: the candidate pool is forced to open,
+// unassigned, and unlimited regardless of the caller's filter, and (nil, nil)
+// is returned when nothing is claimable (the documented "no ready work"
+// contract; see sqlkit capabilities.go).
 func (s *FlatFileStore) ClaimReadyIssue(ctx context.Context, filter types.WorkFilter, actor string) (*types.Issue, error) {
-	ready, err := s.GetReadyWork(ctx, filter)
+	claimFilter := filter
+	claimFilter.Status = types.StatusOpen
+	claimFilter.Unassigned = true
+	claimFilter.Assignee = nil
+	claimFilter.Limit = 0
+
+	ready, err := s.GetReadyWork(ctx, claimFilter)
 	if err != nil {
 		return nil, err
 	}
@@ -684,11 +695,18 @@ func (s *FlatFileStore) ClaimReadyIssue(ctx context.Context, filter types.WorkFi
 			if errors.Is(err, storage.ErrAlreadyClaimed) || errors.Is(err, storage.ErrNotClaimable) {
 				continue
 			}
+			// A candidate that turned open+assigned between the ready snapshot
+			// and the claim would never have entered the reference's pool (its
+			// Unassigned filter runs in the same transaction); skip it too.
+			if cur, rerr := s.readIssue(issue.ID); rerr == nil &&
+				cur.Status == types.StatusOpen && cur.Assignee != "" && cur.Assignee != actor {
+				continue
+			}
 			return nil, err
 		}
 		return s.GetIssue(ctx, issue.ID)
 	}
-	return nil, storage.ErrNotFound
+	return nil, nil
 }
 
 // UnclaimIssue releases a claim: clears the assignee and returns the issue to
