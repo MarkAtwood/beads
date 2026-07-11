@@ -87,22 +87,41 @@ either migration can be retried, and can be removed afterwards.`,
 			return HandleError("failed to create flat-file store: %v", err)
 		}
 
+		// Any failure below aborts BEFORE metadata.json is flipped, so the
+		// workspace keeps routing to Dolt and nothing is lost: a migration
+		// that silently dropped issues, labels, dependencies, comments, or
+		// config would print success and invite 'rm -rf .beads/dolt'.
+		abortMigration := func(format string, args ...interface{}) error {
+			_ = ffStore.Close()
+			return HandleError("%s\n\nMigration aborted: the Dolt data is untouched and the workspace still routes to Dolt.\nFix the cause, remove the partial flat-file output, and re-run:\n  rm -rf %s/issues %s/comments %s/config_kv.json\n  bd migrate flatfile",
+				fmt.Sprintf(format, args...), beadsDir, beadsDir, beadsDir)
+		}
+
 		// Migrate issues.
-		migrated := 0
+		failed := 0
 		for _, issue := range issues {
 			// Hydrate labels.
-			labels, _ := s.GetLabels(ctx, issue.ID)
+			labels, err := s.GetLabels(ctx, issue.ID)
+			if err != nil {
+				return abortMigration("failed to load labels for %s: %v", issue.ID, err)
+			}
 			issue.Labels = labels
 
 			// Hydrate dependencies.
-			deps, _ := s.GetDependencies(ctx, issue.ID)
-			// Build Dependency records from resolved issues.
 			var depRecords []*types.Dependency
 			if dqStore, ok := s.(interface {
 				GetDependencyRecords(context.Context, string) ([]*types.Dependency, error)
 			}); ok {
-				depRecords, _ = dqStore.GetDependencyRecords(ctx, issue.ID)
+				depRecords, err = dqStore.GetDependencyRecords(ctx, issue.ID)
+				if err != nil {
+					return abortMigration("failed to load dependencies for %s: %v", issue.ID, err)
+				}
 			} else {
+				// Build Dependency records from resolved issues.
+				deps, err := s.GetDependencies(ctx, issue.ID)
+				if err != nil {
+					return abortMigration("failed to load dependencies for %s: %v", issue.ID, err)
+				}
 				for _, dep := range deps {
 					depRecords = append(depRecords, &types.Dependency{
 						IssueID:     issue.ID,
@@ -115,25 +134,26 @@ either migration can be retried, and can be removed afterwards.`,
 
 			if err := ffStore.CreateIssue(ctx, issue, "migrate"); err != nil {
 				fmt.Fprintf(os.Stderr, "Warning: failed to migrate %s: %v\n", issue.ID, err)
-				continue
+				failed++
 			}
-			migrated++
 		}
-		fmt.Printf("Migrated %d/%d issues.\n", migrated, len(issues))
+		if failed > 0 {
+			return abortMigration("%d of %d issues failed to migrate", failed, len(issues))
+		}
+		fmt.Printf("Migrated %d/%d issues.\n", len(issues), len(issues))
 
 		// Migrate comments.
 		commentCount := 0
 		for _, issue := range issues {
 			comments, err := s.GetIssueComments(ctx, issue.ID)
 			if err != nil {
-				continue
+				return abortMigration("failed to load comments for %s: %v", issue.ID, err)
 			}
 			for _, c := range comments {
 				// ImportComment (not ImportIssueComment) so the Dolt comment ID
 				// survives: a later --reverse migration must round-trip losslessly.
 				if err := ffStore.ImportComment(ctx, c); err != nil {
-					fmt.Fprintf(os.Stderr, "Warning: failed to migrate comment on %s: %v\n", c.IssueID, err)
-					continue
+					return abortMigration("failed to migrate comment on %s: %v", c.IssueID, err)
 				}
 				commentCount++
 			}
@@ -142,16 +162,17 @@ either migration can be retried, and can be removed afterwards.`,
 			fmt.Printf("Migrated %d comments.\n", commentCount)
 		}
 
-		// Migrate config KV.
+		// Migrate config KV (issue_prefix, bd-remember memories, custom keys).
 		allConfig, err := s.GetAllConfig(ctx)
-		if err == nil {
-			for k, v := range allConfig {
-				if err := ffStore.SetConfig(ctx, k, v); err != nil {
-					fmt.Fprintf(os.Stderr, "Warning: failed to migrate config %s: %v\n", k, err)
-				}
-			}
-			fmt.Printf("Migrated %d config entries.\n", len(allConfig))
+		if err != nil {
+			return abortMigration("failed to read config: %v", err)
 		}
+		for k, v := range allConfig {
+			if err := ffStore.SetConfig(ctx, k, v); err != nil {
+				return abortMigration("failed to migrate config %s: %v", k, err)
+			}
+		}
+		fmt.Printf("Migrated %d config entries.\n", len(allConfig))
 
 		// Update metadata.json to flatfile backend.
 		metaPath := filepath.Join(beadsDir, "metadata.json")
@@ -169,7 +190,9 @@ either migration can be retried, and can be removed afterwards.`,
 		newMeta, _ := json.MarshalIndent(meta, "", "  ")
 		newMeta = append(newMeta, '\n')
 		if err := os.WriteFile(metaPath, newMeta, 0o644); err != nil {
-			fmt.Fprintf(os.Stderr, "Warning: failed to update metadata.json: %v\n", err)
+			// Without the backend flip the migration did NOT complete; a
+			// warning here would print success while bd still routes to Dolt.
+			return abortMigration("failed to update metadata.json: %v", err)
 		}
 
 		// Update .gitignore for flat-file.
