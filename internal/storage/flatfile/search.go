@@ -118,13 +118,16 @@ func (s *FlatFileStore) SearchIssuesWithCounts(_ context.Context, query string, 
 	}
 
 	// Build reverse dep index for dependent counts from the same snapshot.
+	// Counts include only 'blocks' edges, mirroring sqlbuild.SearchCountsSQL's
+	// dep_count/rdep_count subqueries (WHERE type = 'blocks') and this store's
+	// own GetReadyWorkWithCounts/GetDependencyCounts paths.
 	depCounts := make(map[string]int)
 	parentMap := make(map[string]string)
 	for _, a := range all {
 		for _, dep := range a.Dependencies {
 			if dep.Type == types.DepParentChild {
 				parentMap[a.ID] = dep.DependsOnID
-			} else {
+			} else if dep.Type == types.DepBlocks {
 				depCounts[dep.DependsOnID]++
 			}
 		}
@@ -134,7 +137,7 @@ func (s *FlatFileStore) SearchIssuesWithCounts(_ context.Context, query string, 
 	for _, issue := range issues {
 		depCount := 0
 		for _, dep := range issue.Dependencies {
-			if dep.Type != types.DepParentChild {
+			if dep.Type == types.DepBlocks {
 				depCount++
 			}
 		}

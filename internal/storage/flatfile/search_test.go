@@ -431,6 +431,68 @@ func TestSearchIssuesWithCountsCommentDirUnreadable(t *testing.T) {
 	}
 }
 
+// SQL parity (sqlbuild.SearchCountsSQL dep_count/rdep_count subqueries, both
+// WHERE type = 'blocks'): DependencyCount and DependentCount include only
+// 'blocks' edges — related/discovered-from edges must not count. Also pins
+// consistency with GetReadyWorkWithCounts on the same store.
+func TestSearchIssuesWithCountsBlocksOnly(t *testing.T) {
+	s := newTestStore(t)
+	for _, id := range []string{"n-1", "n-2", "n-3"} {
+		if err := s.CreateIssue(ctx, &types.Issue{ID: id, Title: id, Status: types.StatusOpen}, "tester"); err != nil {
+			t.Fatalf("CreateIssue(%s): %v", id, err)
+		}
+	}
+	for _, dep := range []*types.Dependency{
+		{IssueID: "n-1", DependsOnID: "n-2", Type: types.DepRelated},
+		{IssueID: "n-1", DependsOnID: "n-3", Type: types.DepDiscoveredFrom},
+		{IssueID: "n-2", DependsOnID: "n-1", Type: types.DepBlocks},
+	} {
+		if err := s.AddDependency(ctx, dep, "tester"); err != nil {
+			t.Fatalf("AddDependency(%s -> %s): %v", dep.IssueID, dep.DependsOnID, err)
+		}
+	}
+
+	got, err := s.SearchIssuesWithCounts(ctx, "", types.IssueFilter{})
+	if err != nil {
+		t.Fatalf("SearchIssuesWithCounts: %v", err)
+	}
+	byID := make(map[string]*types.IssueWithCounts, len(got))
+	for _, wc := range got {
+		byID[wc.ID] = wc
+	}
+	// n-1: two non-blocks deps count as 0; one incoming blocks edge counts as 1.
+	if byID["n-1"].DependencyCount != 0 || byID["n-1"].DependentCount != 1 {
+		t.Errorf("n-1 counts = (dep %d, rdep %d), want (0, 1)",
+			byID["n-1"].DependencyCount, byID["n-1"].DependentCount)
+	}
+	// n-2: one outgoing blocks edge; the related edge pointing at it must not count.
+	if byID["n-2"].DependencyCount != 1 || byID["n-2"].DependentCount != 0 {
+		t.Errorf("n-2 counts = (dep %d, rdep %d), want (1, 0)",
+			byID["n-2"].DependencyCount, byID["n-2"].DependentCount)
+	}
+	// n-3: discovered-from edge pointing at it must not count.
+	if byID["n-3"].DependencyCount != 0 || byID["n-3"].DependentCount != 0 {
+		t.Errorf("n-3 counts = (dep %d, rdep %d), want (0, 0)",
+			byID["n-3"].DependencyCount, byID["n-3"].DependentCount)
+	}
+
+	// bd ready --counts and bd list --counts must agree on the same store.
+	ready, err := s.GetReadyWorkWithCounts(ctx, types.WorkFilter{})
+	if err != nil {
+		t.Fatalf("GetReadyWorkWithCounts: %v", err)
+	}
+	for _, rc := range ready {
+		sc, ok := byID[rc.ID]
+		if !ok {
+			t.Fatalf("ready issue %s missing from search results", rc.ID)
+		}
+		if rc.DependencyCount != sc.DependencyCount || rc.DependentCount != sc.DependentCount {
+			t.Errorf("%s: ready counts (dep %d, rdep %d) != search counts (dep %d, rdep %d)",
+				rc.ID, rc.DependencyCount, rc.DependentCount, sc.DependencyCount, sc.DependentCount)
+		}
+	}
+}
+
 // DependentCount must be computed over the whole store, not just the filtered
 // result set (guards the single-snapshot refactor of SearchIssuesWithCounts).
 func TestSearchIssuesWithCountsDependentsOutsideFilter(t *testing.T) {
