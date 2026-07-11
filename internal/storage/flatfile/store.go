@@ -58,6 +58,17 @@ type FlatFileStore struct {
 	// of scope: the flat-file store assumes one writing process per checkout.
 	writeMu sync.Mutex
 
+	// txMu serializes transactions: RunInTransaction holds it for the whole
+	// callback so two concurrent transactions cannot interleave journaled
+	// writes (SQL backends get this from database transactions). Nested
+	// RunInTransaction calls would self-deadlock and are unsupported, as on
+	// the SQL backends. journal is the active transaction's pre-image map
+	// (nil outside a transaction), guarded by journalMu because writes from
+	// callback-spawned goroutines may journal concurrently.
+	txMu      sync.Mutex
+	journalMu sync.Mutex
+	journal   map[string]journalEntry
+
 	closed atomic.Bool
 }
 

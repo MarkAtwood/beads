@@ -2,15 +2,16 @@ package flatfile
 
 import (
 	"context"
+	"fmt"
 
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/storage/issueops"
 	"github.com/steveyegge/beads/internal/types"
 )
 
-// flatFileTx implements storage.Transaction. For flat-file, each file write is
-// already atomic (write-then-rename), so the "transaction" is a logical
-// grouping with no rollback of already-written files. The embedded
+// flatFileTx implements storage.Transaction. Each file write is atomic
+// (write-then-rename) and journaled (journal.go), so a failed transaction
+// rolls every touched file back to its pre-image. The embedded
 // *FlatFileStore promotes every store method, so the transaction reuses them
 // directly; only the methods below diverge from their store namesakes.
 type flatFileTx struct {
@@ -19,13 +20,41 @@ type flatFileTx struct {
 
 var _ storage.Transaction = (*flatFileTx)(nil)
 
-// RunInTransaction executes fn within a logical transaction scope.
+// RunInTransaction executes fn as one all-or-nothing mutation: file writes
+// inside fn journal their pre-images, and an error (or panic, matching
+// sqlkit) restores them all. Known gap: UpdateIssueID's best-effort
+// comment-dir/event-file renames are directory moves outside the file
+// journal and are not undone.
 func (s *FlatFileStore) RunInTransaction(ctx context.Context, _ string, fn func(tx storage.Transaction) error) error {
 	if err := s.checkClosed(); err != nil {
 		return err
 	}
-	tx := &flatFileTx{s}
-	return fn(tx)
+	s.txMu.Lock()
+	defer s.txMu.Unlock()
+
+	s.journalMu.Lock()
+	s.journal = make(map[string]journalEntry)
+	s.journalMu.Unlock()
+	defer func() {
+		s.journalMu.Lock()
+		s.journal = nil
+		s.journalMu.Unlock()
+	}()
+
+	defer func() {
+		if r := recover(); r != nil {
+			_ = s.rollbackJournal()
+			panic(r)
+		}
+	}()
+
+	if err := fn(&flatFileTx{s}); err != nil {
+		if rbErr := s.rollbackJournal(); rbErr != nil {
+			return fmt.Errorf("%w (rollback: %v)", err, rbErr)
+		}
+		return err
+	}
+	return nil
 }
 
 // AddDependencyWithOptions ignores the transaction-scoped options: flat-file

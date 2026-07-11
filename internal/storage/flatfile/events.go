@@ -41,6 +41,9 @@ func (s *FlatFileStore) appendEvent(ev *types.Event) error {
 		return fmt.Errorf("flatfile: marshal event: %w", err)
 	}
 	data = append(data, '\n')
+	if err := s.journalPreImage(path); err != nil {
+		return err
+	}
 	f, err := os.OpenFile(path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
 	if err != nil {
 		return fmt.Errorf("flatfile: open events for append: %w", err)

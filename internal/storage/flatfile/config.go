@@ -95,7 +95,7 @@ func (s *FlatFileStore) writeKVFile(path string, kv map[string]string) error {
 	}
 	data = append(data, '\n')
 
-	if err := atomicWriteFile(path, data); err != nil {
+	if err := s.atomicWrite(path, data); err != nil {
 		return fmt.Errorf("flatfile: write kv %s: %w", path, err)
 	}
 	return nil
@@ -133,13 +133,13 @@ func (s *FlatFileStore) syncCustomStatuses(value string) error {
 			return fmt.Errorf("invalid status.custom value: %w", err)
 		}
 	}
-	return writeJSONFile(s.customStatusesPath, parsed)
+	return s.writeJSONFile(s.customStatusesPath, parsed)
 }
 
 // syncCustomTypes replaces the normalized custom-type file with the parsed
 // config value. Mirrors issueops.SyncCustomTypesTable.
 func (s *FlatFileStore) syncCustomTypes(value string) error {
-	return writeJSONFile(s.customTypesPath, parseTypesValue(value))
+	return s.writeJSONFile(s.customTypesPath, parseTypesValue(value))
 }
 
 // parseTypesValue accepts a JSON string array or a comma-separated list,
@@ -183,14 +183,15 @@ func (s *FlatFileStore) readCustomTypes() ([]string, error) {
 }
 
 // writeJSONFile writes v as indented JSON atomically (write-then-rename).
-func writeJSONFile(path string, v interface{}) error {
+// It is a store method so the write is journaled for transaction rollback.
+func (s *FlatFileStore) writeJSONFile(path string, v interface{}) error {
 	data, err := json.MarshalIndent(v, "", "  ")
 	if err != nil {
 		return fmt.Errorf("flatfile: marshal %s: %w", path, err)
 	}
 	data = append(data, '\n')
 
-	if err := atomicWriteFile(path, data); err != nil {
+	if err := s.atomicWrite(path, data); err != nil {
 		return fmt.Errorf("flatfile: write %s: %w", path, err)
 	}
 	return nil

@@ -52,7 +52,7 @@ func (s *FlatFileStore) AddIssueComment(_ context.Context, issueID, author, text
 	}
 	data = append(data, '\n')
 
-	if err := atomicWriteFile(path, data); err != nil {
+	if err := s.atomicWrite(path, data); err != nil {
 		return nil, fmt.Errorf("flatfile: write comment: %w", err)
 	}
 

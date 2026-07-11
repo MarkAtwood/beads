@@ -119,7 +119,7 @@ func (s *FlatFileStore) writeMergeSlot(state *mergeSlotState) error {
 		return fmt.Errorf("flatfile: marshal merge slot: %w", err)
 	}
 	data = append(data, '\n')
-	if err := atomicWriteFile(s.mergeslotPath, data); err != nil {
+	if err := s.atomicWrite(s.mergeslotPath, data); err != nil {
 		return fmt.Errorf("flatfile: write merge slot: %w", err)
 	}
 	return nil
@@ -394,7 +394,7 @@ func (s *FlatFileStore) removeIssueFile(id string) error {
 	if err != nil {
 		return err
 	}
-	if err := os.Remove(path); err != nil {
+	if err := s.removeFile(path); err != nil {
 		if errors.Is(err, fs.ErrNotExist) {
 			return storage.ErrNotFound
 		}
@@ -1217,7 +1217,7 @@ func (s *FlatFileStore) writeCommentFile(comment *types.Comment) error {
 	}
 	data = append(data, '\n')
 	path := filepath.Join(dir, filename)
-	if err := atomicWriteFile(path, data); err != nil {
+	if err := s.atomicWrite(path, data); err != nil {
 		return fmt.Errorf("flatfile: write comment: %w", err)
 	}
 	return nil
