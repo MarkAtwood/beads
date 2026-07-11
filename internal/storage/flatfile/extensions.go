@@ -428,11 +428,17 @@ func (s *FlatFileStore) DeleteIssues(_ context.Context, ids []string, cascade bo
 			}
 			return nil, err
 		}
+		if err := s.removeIssueChildFiles(id); err != nil {
+			return nil, err
+		}
 		actualRegular++
 		deleted[id] = true
 	}
 	for _, id := range allWispIDs {
 		if err := s.removeIssueFile(id); err != nil && !errors.Is(err, storage.ErrNotFound) {
+			return nil, err
+		}
+		if err := s.removeIssueChildFiles(id); err != nil {
 			return nil, err
 		}
 		deleted[id] = true
@@ -457,6 +463,27 @@ func (s *FlatFileStore) removeIssueFile(id string) error {
 			return storage.ErrNotFound
 		}
 		return fmt.Errorf("flatfile: delete issue %s: %w", id, err)
+	}
+	return nil
+}
+
+// removeIssueChildFiles mirrors the comments/events FK ON DELETE CASCADE of
+// the SQL backends: the per-issue events JSONL and comments directory go with
+// the issue file. Missing child files are tolerated.
+func (s *FlatFileStore) removeIssueChildFiles(id string) error {
+	eventsPath, err := s.safeEventFilename(id)
+	if err != nil {
+		return err
+	}
+	if err := os.Remove(eventsPath); err != nil && !errors.Is(err, fs.ErrNotExist) {
+		return fmt.Errorf("flatfile: delete events for %s: %w", id, err)
+	}
+	commentsPath, err := safePath(s.commentsDir, id, "")
+	if err != nil {
+		return err
+	}
+	if err := os.RemoveAll(commentsPath); err != nil {
+		return fmt.Errorf("flatfile: delete comments for %s: %w", id, err)
 	}
 	return nil
 }
@@ -511,6 +538,9 @@ func (s *FlatFileStore) DeleteIssuesBySourceRepo(_ context.Context, sourceRepo s
 			if errors.Is(err, storage.ErrNotFound) {
 				continue
 			}
+			return len(deleted), err
+		}
+		if err := s.removeIssueChildFiles(issue.ID); err != nil {
 			return len(deleted), err
 		}
 		deleted[issue.ID] = true

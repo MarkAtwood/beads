@@ -514,7 +514,8 @@ func (s *FlatFileStore) CloseIssue(_ context.Context, id string, reason string, 
 	return s.recordEvent(id, types.EventClosed, actor, "", reason)
 }
 
-// DeleteIssue removes an issue file from disk.
+// DeleteIssue removes an issue file from disk, along with its events file and
+// comments directory (comments/events FK ON DELETE CASCADE parity).
 func (s *FlatFileStore) DeleteIssue(_ context.Context, id string) error {
 	if err := s.checkClosed(); err != nil {
 		return err
@@ -522,17 +523,10 @@ func (s *FlatFileStore) DeleteIssue(_ context.Context, id string) error {
 	s.writeMu.Lock()
 	defer s.writeMu.Unlock()
 
-	path, err := s.safeIssueFilename(id)
-	if err != nil {
+	if err := s.removeIssueFile(id); err != nil {
 		return err
 	}
-	if err := os.Remove(path); err != nil {
-		if errors.Is(err, fs.ErrNotExist) {
-			return storage.ErrNotFound
-		}
-		return fmt.Errorf("flatfile: delete issue %s: %w", id, err)
-	}
-	return nil
+	return s.removeIssueChildFiles(id)
 }
 
 // applyUpdates applies a map of field name → value to an issue struct.
