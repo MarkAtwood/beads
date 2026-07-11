@@ -860,7 +860,7 @@ func (s *FlatFileStore) HeartbeatIssue(ctx context.Context, id, actor string) er
 // non-nil and strictly before cutoff = now - olderThan. Wisps are ephemeral and
 // never leased, so they are never reclaimed. Returns the issues it reverted with
 // the owner each lease was taken from.
-func (s *FlatFileStore) ReclaimExpiredLeases(_ context.Context, olderThan time.Duration, _ string) ([]types.ReclaimedLease, error) {
+func (s *FlatFileStore) ReclaimExpiredLeases(_ context.Context, olderThan time.Duration, actor string) ([]types.ReclaimedLease, error) {
 	if err := s.checkClosed(); err != nil {
 		return nil, err
 	}
@@ -888,6 +888,12 @@ func (s *FlatFileStore) ReclaimExpiredLeases(_ context.Context, olderThan time.D
 		issue.UpdatedAt = now
 		if err := s.writeIssue(issue); err != nil {
 			return nil, fmt.Errorf("flatfile: reclaim %s: %w", issue.ID, err)
+		}
+		// Mirror issueops.ReclaimExpiredLeasesInTx's RecordFullEventInTable:
+		// one lease_reclaimed event per reverted issue, old_value = the owner
+		// the lease was taken from.
+		if err := s.recordEvent(issue.ID, types.EventLeaseReclaimed, actor, prevOwner, ""); err != nil {
+			return nil, fmt.Errorf("flatfile: record reclaim event for %s: %w", issue.ID, err)
 		}
 		reclaimed = append(reclaimed, types.ReclaimedLease{ID: issue.ID, PreviousOwner: prevOwner})
 	}
