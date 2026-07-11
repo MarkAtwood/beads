@@ -128,6 +128,24 @@ func (s *FlatFileStore) CreateIssuesWithFullOptions(ctx context.Context, issues 
 			return err
 		}
 
+		// Mirror issueops.checkCrossTableIDCollision: issues and wisps share
+		// one ID space but live in different buckets, so an incoming issue
+		// whose ID is stored in the sibling bucket is a hard error — or,
+		// under ConflictSkip, a FULL skip that persists no columns, labels,
+		// comments, or dependencies (SQL returns before PersistLabels/
+		// PersistComments). Upserting over it would silently flip the bucket.
+		if stored != nil && issueops.IsWisp(stored) != issueops.IsWisp(issue) {
+			if opts.ConflictSkip {
+				plans = append(plans, &plannedIssue{incoming: issue})
+				continue
+			}
+			sibling := "wisps"
+			if issueops.IsWisp(issue) {
+				sibling = "issues"
+			}
+			return fmt.Errorf("cannot create %q: ID already exists in the %s table (issues and wisps share one ID space)", issue.ID, sibling)
+		}
+
 		plan := &plannedIssue{incoming: issue, deps: issue.Dependencies}
 		switch {
 		case stored == nil:
