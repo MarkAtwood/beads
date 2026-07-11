@@ -750,7 +750,14 @@ func applyUpdates(issue *types.Issue, updates map[string]interface{}) error {
 				issue.IssueType = v
 			}
 		case "assignee":
-			if v, ok := val.(string); ok {
+			// The SQL reference binds the raw value, so nil → SQL NULL clears
+			// the column; manageLeaseOnUpdate already treats nil as "" — the
+			// stored field must agree or the issue keeps its assignee with no
+			// lease.
+			switch v := val.(type) {
+			case nil:
+				issue.Assignee = ""
+			case string:
 				issue.Assignee = v
 			}
 		case "owner":

@@ -882,3 +882,44 @@ func TestRepairIssueTimestampsPreservesUserContent(t *testing.T) {
 		t.Errorf("embedded comment created_at not repaired: %+v", got.Comments)
 	}
 }
+
+// Oracle: the SQL reference (issueops updateIssueInTx) binds the raw update
+// value, so assignee=nil becomes SQL NULL and clears the column, while
+// issueops.ManageLeaseOnUpdate's explicit nil case clears the lease. Both
+// halves must agree: after {"assignee": nil} the issue is unassigned AND
+// lease-free, never an assigned issue with no lease.
+func TestUpdateIssueNilAssigneeClears(t *testing.T) {
+	s := newTestStore(t)
+
+	if err := s.CreateIssue(ctx, &types.Issue{ID: "nilassign-1", Title: "t"}, "tester"); err != nil {
+		t.Fatalf("CreateIssue: %v", err)
+	}
+	err := s.UpdateIssue(ctx, "nilassign-1", map[string]interface{}{
+		"status":   string(types.StatusInProgress),
+		"assignee": "alice",
+	}, "tester")
+	if err != nil {
+		t.Fatalf("UpdateIssue claim: %v", err)
+	}
+	claimed, err := s.GetIssue(ctx, "nilassign-1")
+	if err != nil {
+		t.Fatalf("GetIssue: %v", err)
+	}
+	if claimed.Assignee != "alice" || claimed.LeaseExpiresAt == nil {
+		t.Fatalf("precondition: assignee=%q lease=%v, want alice with lease", claimed.Assignee, claimed.LeaseExpiresAt)
+	}
+
+	if err := s.UpdateIssue(ctx, "nilassign-1", map[string]interface{}{"assignee": nil}, "tester"); err != nil {
+		t.Fatalf("UpdateIssue nil assignee: %v", err)
+	}
+	got, err := s.GetIssue(ctx, "nilassign-1")
+	if err != nil {
+		t.Fatalf("GetIssue after clear: %v", err)
+	}
+	if got.Assignee != "" {
+		t.Errorf("assignee = %q, want cleared", got.Assignee)
+	}
+	if got.LeaseExpiresAt != nil || got.HeartbeatAt != nil {
+		t.Errorf("lease not cleared: expires=%v heartbeat=%v", got.LeaseExpiresAt, got.HeartbeatAt)
+	}
+}
