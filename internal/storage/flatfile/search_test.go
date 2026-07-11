@@ -308,3 +308,31 @@ func TestSearchIssuesParentIDImplicitDottedChildren(t *testing.T) {
 		t.Errorf("ParentID=p-1: matched wrong issues: %v", ids)
 	}
 }
+
+// SQL parity (issueops countGroupForTablesInTx): unknown groupBy — including
+// the SQL column name "issue_type" — errors instead of returning a bucket.
+func TestCountIssuesByGroupUnsupportedErrors(t *testing.T) {
+	s := newTestStore(t)
+	seedIssues(t, s)
+
+	for _, bad := range []string{"prio", "issue_type", ""} {
+		if _, err := s.CountIssuesByGroup(ctx, types.IssueFilter{}, bad); err == nil {
+			t.Errorf("CountIssuesByGroup(%q): want error, got nil", bad)
+		}
+	}
+
+	// Errors on an empty store too (SQL errors regardless of row count).
+	empty := newTestStore(t)
+	if _, err := empty.CountIssuesByGroup(ctx, types.IssueFilter{}, "prio"); err == nil {
+		t.Error("CountIssuesByGroup on empty store: want error, got nil")
+	}
+
+	// "type" remains the supported spelling.
+	counts, err := s.CountIssuesByGroup(ctx, types.IssueFilter{}, "type")
+	if err != nil {
+		t.Fatalf("CountIssuesByGroup(type): %v", err)
+	}
+	if counts["bug"] != 2 {
+		t.Errorf("type=bug count = %d, want 2", counts["bug"])
+	}
+}
