@@ -110,6 +110,18 @@ func newFlatFileStoreNoCreate(beadsDir string) (*FlatFileStore, error) {
 		return nil, fmt.Errorf("flatfile: resolve beads dir: %w", err)
 	}
 
+	// .beads is git-synced: a hostile repo can commit the directory ITSELF as
+	// a symlink that a plain checkout materializes, routing every store read
+	// and write (issues/, comments/, events/, config files) to an
+	// attacker-chosen target. safePath's per-write rejectSymlink calls Lstat
+	// only the final path component — Lstat traverses ancestors — so they
+	// never see this link; reject it once here, which both open paths share.
+	// Ancestors of beadsDir are the user's own filesystem, not controlled by
+	// a checkout, so symlinks there (e.g. macOS /var) stay allowed.
+	if err := rejectSymlink(abs); err != nil {
+		return nil, err
+	}
+
 	s := &FlatFileStore{
 		beadsDir:      abs,
 		issuesDir:     filepath.Join(abs, "issues"),
