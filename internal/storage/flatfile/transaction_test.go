@@ -1,7 +1,9 @@
 package flatfile
 
 import (
+	"bytes"
 	"errors"
+	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
@@ -259,4 +261,69 @@ func TestCycleThroughEdgesSelfLoop(t *testing.T) {
 			t.Errorf("cycle = %q, want %q", cycle, want)
 		}
 	})
+}
+
+// A failed transaction that cascade-deleted an issue must restore the issue
+// file, its events file, AND every comment file byte-identical — including
+// recreating the comments/<id>/ directory the cascade removed (SQL rollback
+// restores the comment rows; losing them violates all-or-nothing).
+func TestRollbackRestoresCascadeDeletedCommentFiles(t *testing.T) {
+	s := newTestStore(t)
+	const id = "cascade-1"
+	if err := s.CreateIssue(ctx, &types.Issue{ID: id, Title: "with comments"}, "t"); err != nil {
+		t.Fatalf("CreateIssue: %v", err)
+	}
+	for _, text := range []string{"first comment", "second comment"} {
+		if _, err := s.AddIssueComment(ctx, id, "t", text); err != nil {
+			t.Fatalf("AddIssueComment: %v", err)
+		}
+	}
+
+	// Snapshot every on-disk artifact of the issue before the transaction.
+	pre := map[string][]byte{}
+	snapshot := func(path string) {
+		data, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatalf("snapshot %s: %v", path, err)
+		}
+		pre[path] = data
+	}
+	snapshot(filepath.Join(s.issuesDir, id+".json"))
+	snapshot(s.eventFilename(id))
+	commentsDir := filepath.Join(s.commentsDir, id)
+	entries, err := os.ReadDir(commentsDir)
+	if err != nil {
+		t.Fatalf("read comments dir: %v", err)
+	}
+	if len(entries) != 2 {
+		t.Fatalf("comment files = %d, want 2", len(entries))
+	}
+	for _, e := range entries {
+		snapshot(filepath.Join(commentsDir, e.Name()))
+	}
+
+	sentinel := errors.New("boom")
+	err = s.RunInTransaction(ctx, "", func(tx storage.Transaction) error {
+		if err := tx.DeleteIssue(ctx, id); err != nil {
+			return err
+		}
+		return sentinel
+	})
+	if !errors.Is(err, sentinel) {
+		t.Fatalf("RunInTransaction error = %v, want sentinel", err)
+	}
+	if strings.Contains(err.Error(), "rollback") {
+		t.Fatalf("rollback itself failed: %v", err)
+	}
+
+	for path, want := range pre {
+		got, err := os.ReadFile(path)
+		if err != nil {
+			t.Errorf("after rollback, %s unreadable: %v", path, err)
+			continue
+		}
+		if !bytes.Equal(got, want) {
+			t.Errorf("after rollback, %s differs from pre-transaction content", path)
+		}
+	}
 }

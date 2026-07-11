@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"io/fs"
 	"os"
+	"path/filepath"
 )
 
 // journalEntry is one file's state before the active transaction first
@@ -62,7 +63,13 @@ func (s *FlatFileStore) rollbackJournal() error {
 	for path, e := range entries {
 		var err error
 		if e.exists {
-			err = atomicWriteFile(path, e.data)
+			// The transaction may have removed the file's parent directory
+			// (DeleteIssue cascades remove the now-empty comments/<id>/ dir,
+			// which is not itself journaled). Recreate it, or the pre-image
+			// write below fails ENOENT and the data is lost with the journal.
+			if err = os.MkdirAll(filepath.Dir(path), 0o755); err == nil {
+				err = atomicWriteFile(path, e.data)
+			}
 		} else if err = os.Remove(path); errors.Is(err, fs.ErrNotExist) {
 			err = nil
 		}
