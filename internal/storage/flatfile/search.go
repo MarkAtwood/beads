@@ -27,10 +27,19 @@ func (s *FlatFileStore) SearchIssues(_ context.Context, query string, filter typ
 		return nil, err
 	}
 
-	// Pre-compile label regex once for the entire search.
+	// Pre-compile label regex once for the entire search. An invalid regex
+	// or glob is an error, never a silent match-all / match-none.
 	var labelRe *regexp.Regexp
 	if filter.LabelRegex != "" {
-		labelRe, _ = regexp.Compile(filter.LabelRegex)
+		labelRe, err = regexp.Compile(filter.LabelRegex)
+		if err != nil {
+			return nil, fmt.Errorf("invalid label regex %q: %w", filter.LabelRegex, err)
+		}
+	}
+	if filter.LabelPattern != "" {
+		if _, err := filepath.Match(filter.LabelPattern, ""); err != nil {
+			return nil, fmt.Errorf("invalid label pattern %q: %w", filter.LabelPattern, err)
+		}
 	}
 
 	var result []*types.Issue
@@ -302,7 +311,8 @@ func matchesFilter(issue *types.Issue, f types.IssueFilter, labelRe *regexp.Rege
 			}
 		}
 	}
-	// Label pattern (glob)
+	// Label pattern (glob) — pre-validated in SearchIssues, so Match cannot
+	// error here (filepath.Match fails only on malformed patterns).
 	if f.LabelPattern != "" {
 		found := false
 		for _, l := range issue.Labels {
