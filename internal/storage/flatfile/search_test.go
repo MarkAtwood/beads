@@ -261,3 +261,50 @@ func TestSearchIssuesValidLabelRegexAndPattern(t *testing.T) {
 		t.Errorf("LabelPattern u*: got %d issues, want 2 (urgent, ui)", len(got))
 	}
 }
+
+// SQL parity (sqlbuild/filter.go ParentID clause): --parent matches explicit
+// parent-child deps AND implicit dotted-ID children that have no parent-child
+// dep at all; a dotted-ID issue with a parent-child dep to a DIFFERENT parent
+// must not match via the prefix fallback.
+func TestSearchIssuesParentIDImplicitDottedChildren(t *testing.T) {
+	s := newTestStore(t)
+
+	for _, id := range []string{"p-1", "p-2", "p-1.1", "p-1.2", "p-1.3", "p-10"} {
+		if err := s.CreateIssue(ctx, &types.Issue{ID: id, Title: id}, "tester"); err != nil {
+			t.Fatalf("CreateIssue(%s): %v", id, err)
+		}
+	}
+	// p-1.1: explicit child of p-1. p-1.2: no deps (implicit child).
+	// p-1.3: dotted ID but explicitly parented under p-2 — must NOT match p-1.
+	for _, d := range []struct{ child, parent string }{
+		{"p-1.1", "p-1"}, {"p-1.3", "p-2"},
+	} {
+		dep := &types.Dependency{IssueID: d.child, DependsOnID: d.parent, Type: types.DepParentChild}
+		if err := s.AddDependency(ctx, dep, "tester"); err != nil {
+			t.Fatalf("AddDependency(%s->%s): %v", d.child, d.parent, err)
+		}
+	}
+
+	parent := "p-1"
+	got, err := s.SearchIssues(ctx, "", types.IssueFilter{ParentID: &parent})
+	if err != nil {
+		t.Fatalf("SearchIssues: %v", err)
+	}
+	ids := make(map[string]bool, len(got))
+	for _, is := range got {
+		ids[is.ID] = true
+	}
+	want := []string{"p-1.1", "p-1.2"}
+	if len(got) != len(want) {
+		t.Errorf("ParentID=p-1: got %d issues %v, want %v", len(got), ids, want)
+	}
+	for _, w := range want {
+		if !ids[w] {
+			t.Errorf("ParentID=p-1: missing %s", w)
+		}
+	}
+	// p-10 shares the "p-1" string prefix but not the "p-1." dotted prefix.
+	if ids["p-10"] || ids["p-1.3"] {
+		t.Errorf("ParentID=p-1: matched wrong issues: %v", ids)
+	}
+}
