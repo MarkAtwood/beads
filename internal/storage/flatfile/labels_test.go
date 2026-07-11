@@ -6,6 +6,23 @@ import (
 	"github.com/steveyegge/beads/internal/types"
 )
 
+// SQL reference semantics: GetLabelsInTx is a bare SELECT on the labels table,
+// so an unknown or just-deleted issue ID returns an empty list with no error
+// on every SQL backend. Flatfile must not surface not-found instead. This
+// also matches flatfile's own GetIssueComments/CountEvents, which return
+// empty/0 for missing issues.
+func TestGetLabelsMissingIssueReturnsEmpty(t *testing.T) {
+	s := newTestStore(t)
+
+	labels, err := s.GetLabels(ctx, "no-such-1")
+	if err != nil {
+		t.Fatalf("GetLabels(missing) = %v; SQL backends return empty list, nil", err)
+	}
+	if len(labels) != 0 {
+		t.Errorf("GetLabels(missing) = %v, want empty", labels)
+	}
+}
+
 // SQL reference semantics: AddLabelInTx/RemoveLabelInTx only insert/delete the
 // label row and record an event — no backend touches issues.updated_at on
 // label ops. Flatfile must not bump UpdatedAt either, or updated-since filters
