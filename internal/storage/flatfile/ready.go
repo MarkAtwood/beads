@@ -241,7 +241,12 @@ func (s *FlatFileStore) GetReadyWorkWithCounts(ctx context.Context, filter types
 	for _, a := range all {
 		for _, dep := range a.Dependencies {
 			if dep.Type == types.DepParentChild {
-				parentMap[a.ID] = dep.DependsOnID
+				// With multiple parent-child deps, sqlbuild.SearchCountsSQL
+				// projects MIN(target) AS parent_id — keep the
+				// lexicographically smallest, not the last seen.
+				if p, ok := parentMap[a.ID]; !ok || dep.DependsOnID < p {
+					parentMap[a.ID] = dep.DependsOnID
+				}
 			} else if dep.Type == types.DepBlocks {
 				dependentCounts[dep.DependsOnID]++
 			}
