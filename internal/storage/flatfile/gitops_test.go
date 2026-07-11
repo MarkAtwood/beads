@@ -135,6 +135,34 @@ func newPeerClone(t *testing.T, repoDir, branch string) string {
 	return clone
 }
 
+// TASKS-vl2x: Push/PushTo must not stage .beads/ as a side effect — push
+// publishes commits, and a stealth 'git add' pollutes the user's index.
+func TestPushDoesNotTouchIndex(t *testing.T) {
+	ctx := context.Background()
+	s, dir := newGitStore(t, "main")
+	newPeerClone(t, dir, "main")
+	gitRun(t, dir, "branch", "--set-upstream-to=peer/main", "main")
+
+	// Uncommitted bd change sitting in the worktree.
+	writeIssueFile(t, dir, "test-1", "uncommitted edit")
+
+	if err := s.Push(ctx); err != nil {
+		t.Fatalf("Push: %v", err)
+	}
+	if staged := gitRun(t, dir, "diff", "--cached", "--name-only"); staged != "" {
+		t.Fatalf("Push staged files as a side effect: %q", staged)
+	}
+	if err := s.PushTo(ctx, "peer"); err != nil {
+		t.Fatalf("PushTo: %v", err)
+	}
+	if err := s.ForcePush(ctx); err != nil {
+		t.Fatalf("ForcePush: %v", err)
+	}
+	if staged := gitRun(t, dir, "diff", "--cached", "--name-only"); staged != "" {
+		t.Fatalf("push staged files as a side effect: %q", staged)
+	}
+}
+
 // TASKS-7u7b: a conflicted Sync must leave the unmerged index entries intact
 // (no "git add" sweep) so ResolveConflicts still has stage-2/3 entries to work
 // with, and no conflict-markered JSON is ever staged as resolved.
