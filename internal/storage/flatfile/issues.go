@@ -265,6 +265,11 @@ func (s *FlatFileStore) CreateIssue(ctx context.Context, issue *types.Issue, act
 			prefix = issue.PrefixOverride
 		} else if issue.IDPrefix != "" {
 			prefix = prefix + "-" + issue.IDPrefix
+		} else if issueops.IsWisp(issue) {
+			// Mirrors issueops.CreateIssueInTxWithResult and the batch path:
+			// ephemeral issues carry the -wisp ID segment that downstream
+			// ephemeral detection keys on.
+			prefix = prefix + "-wisp"
 		}
 		if issue.CreatedAt.IsZero() {
 			issue.CreatedAt = time.Now().UTC()
