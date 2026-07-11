@@ -10,6 +10,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/steveyegge/beads/internal/storage/issueops"
+	"github.com/steveyegge/beads/internal/storage/sqlbuild"
 	"github.com/steveyegge/beads/internal/types"
 )
 
@@ -126,6 +128,10 @@ func (s *FlatFileStore) CountIssues(ctx context.Context, query string, filter ty
 }
 
 // CountIssuesByGroup returns per-group counts for the given groupBy field.
+// Key normalization mirrors issueops' countByColumnInTx/countByLabelInTx:
+// priorities are P-prefixed (P0/P1/...), empty assignees collapse into
+// "(unassigned)", and unlabeled issues bucket under "(no labels)" — a key
+// that is absent (not zero) when every issue is labeled.
 func (s *FlatFileStore) CountIssuesByGroup(ctx context.Context, filter types.IssueFilter, groupBy string) (map[string]int, error) {
 	filter.Limit = 0
 	filter.Offset = 0
@@ -141,7 +147,7 @@ func (s *FlatFileStore) CountIssuesByGroup(ctx context.Context, filter types.Iss
 		case "status":
 			key = string(issue.Status)
 		case "priority":
-			key = fmt.Sprintf("%d", issue.Priority)
+			key = fmt.Sprintf("P%d", issue.Priority)
 		case "type", "issue_type":
 			key = string(issue.IssueType)
 		case "assignee":
@@ -151,7 +157,7 @@ func (s *FlatFileStore) CountIssuesByGroup(ctx context.Context, filter types.Iss
 			}
 		case "label":
 			if len(issue.Labels) == 0 {
-				counts["(none)"]++
+				counts["(no labels)"]++
 			} else {
 				for _, l := range issue.Labels {
 					counts[l]++
@@ -185,16 +191,26 @@ func (s *FlatFileStore) countCommentFiles(issueID string) (int, error) {
 	return count, nil
 }
 
-// matchesQuery returns true if the issue matches a text search query.
+// matchesQuery mirrors sqlbuild.BuildIssueFilterClauses' text-query branch:
+// an ID-shaped token matches id exactly, an id prefix, or a title /
+// external_ref substring; anything else matches title or id substrings.
 func matchesQuery(issue *types.Issue, query string) bool {
 	if query == "" {
 		return true
 	}
 	q := strings.ToLower(query)
+	lowerID := strings.ToLower(issue.ID)
+	if sqlbuild.LooksLikeIssueID(query) {
+		ref := ""
+		if issue.ExternalRef != nil {
+			ref = strings.ToLower(*issue.ExternalRef)
+		}
+		return lowerID == q || strings.HasPrefix(lowerID, q) ||
+			strings.Contains(strings.ToLower(issue.Title), q) ||
+			strings.Contains(ref, q)
+	}
 	return strings.Contains(strings.ToLower(issue.Title), q) ||
-		strings.Contains(strings.ToLower(issue.Description), q) ||
-		strings.Contains(strings.ToLower(issue.ID), q) ||
-		strings.Contains(strings.ToLower(issue.Notes), q)
+		strings.Contains(lowerID, q)
 }
 
 // matchesFilter returns true if the issue matches all filter criteria.
@@ -397,6 +413,11 @@ func matchesFilter(issue *types.Issue, f types.IssueFilter, labelRe *regexp.Rege
 		return false
 	}
 
+	// Wisp routing: SkipWisps drops the wisps tier entirely.
+	if f.SkipWisps && issueops.IsWisp(issue) {
+		return false
+	}
+
 	// Ephemeral
 	if f.Ephemeral != nil {
 		if *f.Ephemeral && !issue.Ephemeral {
@@ -528,29 +549,12 @@ func matchesFilter(issue *types.Issue, f types.IssueFilter, labelRe *regexp.Rege
 	return true
 }
 
+// sortIssues applies the canonical sort contract via sqlbuild.Less, the
+// Go-side mirror of the SQL ORDER BY (priority ASC, created_at DESC, id ASC
+// by default; NULLs-last-on-DESC for nullable columns like closed_at).
 func sortIssues(issues []*types.Issue, sortBy string, desc bool) {
-	if sortBy == "" {
-		sortBy = "created_at"
-	}
-
 	sort.Slice(issues, func(i, j int) bool {
-		var less bool
-		switch sortBy {
-		case "priority":
-			less = issues[i].Priority < issues[j].Priority
-		case "updated_at":
-			less = issues[i].UpdatedAt.Before(issues[j].UpdatedAt)
-		case "title":
-			less = issues[i].Title < issues[j].Title
-		case "status":
-			less = issues[i].Status < issues[j].Status
-		default: // created_at
-			less = issues[i].CreatedAt.Before(issues[j].CreatedAt)
-		}
-		if desc {
-			return !less
-		}
-		return less
+		return sqlbuild.Less(issues[i], issues[j], sortBy, desc)
 	})
 }
 

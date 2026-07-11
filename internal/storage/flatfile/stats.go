@@ -6,25 +6,10 @@ import (
 	"github.com/steveyegge/beads/internal/types"
 )
 
-// isWorkableStatus and hasOpenBlocker back the statistics ready-count only;
-// the ready-work path itself uses the is_blocked projection in ready.go.
-func isWorkableStatus(s types.Status) bool {
-	return s == types.StatusOpen || s == types.StatusInProgress || s == types.StatusBlocked
-}
-
-func hasOpenBlocker(issue *types.Issue, statusMap map[string]types.Status) bool {
-	for _, dep := range issue.Dependencies {
-		if dep.Type == types.DepParentChild {
-			continue
-		}
-		if st, ok := statusMap[dep.DependsOnID]; ok && st != types.StatusClosed {
-			return true
-		}
-	}
-	return false
-}
-
-// GetStatistics returns aggregate metrics across all issues.
+// GetStatistics returns aggregate metrics across all issues. Mirrors
+// issueops.GetStatisticsInTx: six status counts, BlockedIssues from the
+// is_blocked projection (active issues with an active blocker), and
+// ReadyIssues = OpenIssues - BlockedIssues clamped at zero.
 func (s *FlatFileStore) GetStatistics(_ context.Context) (*types.Statistics, error) {
 	if err := s.checkClosed(); err != nil {
 		return nil, err
@@ -33,11 +18,6 @@ func (s *FlatFileStore) GetStatistics(_ context.Context) (*types.Statistics, err
 	all, err := s.loadAllIssues()
 	if err != nil {
 		return nil, err
-	}
-
-	statusMap := make(map[string]types.Status, len(all))
-	for _, issue := range all {
-		statusMap[issue.ID] = issue.Status
 	}
 
 	stats := &types.Statistics{}
@@ -60,22 +40,25 @@ func (s *FlatFileStore) GetStatistics(_ context.Context) (*types.Statistics, err
 				totalLead += lead
 				closedWithLead++
 			}
-		case types.StatusBlocked:
-			stats.BlockedIssues++
 		case types.StatusDeferred:
 			stats.DeferredIssues++
-		case types.StatusPinned, types.StatusHooked:
-			// Hooked issues are internal coordination state; no dedicated counter.
+		case types.StatusBlocked, types.StatusPinned, types.StatusHooked:
+			// No dedicated status counter, matching the SQL reference: the
+			// blocked count comes from the is_blocked projection below and
+			// PinnedIssues from the pinned column flag.
 		}
 
 		if issue.Pinned {
 			stats.PinnedIssues++
 		}
+	}
 
-		// Ready: open/in_progress with no open blockers
-		if isWorkableStatus(issue.Status) && !isDeferred(issue) && !hasOpenBlocker(issue, statusMap) {
-			stats.ReadyIssues++
-		}
+	// BlockedIssues mirrors `is_blocked = 1 AND status NOT IN (closed, pinned)`;
+	// computeBlockedSet only ever marks active (non-closed, non-pinned) issues.
+	stats.BlockedIssues = len(computeBlockedSet(all))
+	stats.ReadyIssues = stats.OpenIssues - stats.BlockedIssues
+	if stats.ReadyIssues < 0 {
+		stats.ReadyIssues = 0
 	}
 
 	// Count epics eligible for closure

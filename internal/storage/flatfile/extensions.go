@@ -1274,6 +1274,10 @@ func (s *FlatFileStore) GetMoleculeLastActivity(_ context.Context, moleculeID st
 	return result, nil
 }
 
+// GetStaleIssues mirrors issueops.GetStaleIssuesInTx: wisps are always
+// excluded (the query hits only the issues table), a non-empty filter.Status
+// REPLACES the default open+in_progress set entirely, and results are
+// ordered by updated_at ascending (stalest first) before the limit applies.
 func (s *FlatFileStore) GetStaleIssues(_ context.Context, filter types.StaleFilter) ([]*types.Issue, error) {
 	if err := s.checkClosed(); err != nil {
 		return nil, err
@@ -1282,20 +1286,28 @@ func (s *FlatFileStore) GetStaleIssues(_ context.Context, filter types.StaleFilt
 	if err != nil {
 		return nil, err
 	}
-	cutoff := time.Now().AddDate(0, 0, -filter.Days)
+	cutoff := time.Now().UTC().AddDate(0, 0, -filter.Days)
 	var result []*types.Issue
 	for _, issue := range all {
-		if filter.Status != "" && string(issue.Status) != filter.Status {
+		if issueops.IsWisp(issue) {
 			continue
-		} else if filter.Status == "" && issue.Status == types.StatusClosed {
+		}
+		if filter.Status != "" {
+			if string(issue.Status) != filter.Status {
+				continue
+			}
+		} else if issue.Status != types.StatusOpen && issue.Status != types.StatusInProgress {
 			continue
 		}
 		if issue.UpdatedAt.Before(cutoff) {
 			result = append(result, issue)
-			if filter.Limit > 0 && len(result) >= filter.Limit {
-				break
-			}
 		}
+	}
+	sort.Slice(result, func(i, j int) bool {
+		return result[i].UpdatedAt.Before(result[j].UpdatedAt)
+	})
+	if filter.Limit > 0 && len(result) > filter.Limit {
+		result = result[:filter.Limit]
 	}
 	return result, nil
 }
