@@ -340,11 +340,15 @@ func TestCountIssuesByGroupUnsupportedErrors(t *testing.T) {
 }
 
 // SQL parity (sqlbuild.AppendMetadataClauses): metadata filters compare
-// JSON_UNQUOTE(JSON_EXTRACT(...)) text — JSON source text for non-strings,
-// unquoted contents for strings — and invalid keys are an error.
+// JSON_UNQUOTE(JSON_EXTRACT(...)) text — JSON source text for non-string
+// scalars, unquoted contents for strings, MySQL's spaced serialization for
+// objects/arrays (go-mysql-server writeMarshalledValue: ", "/": " separators,
+// keys ordered by length then bytewise, integral floats without fraction) —
+// and invalid keys are an error.
 func TestSearchIssuesMetadataJSONTextComparison(t *testing.T) {
 	s := newTestStore(t)
-	meta := []byte(`{"count": 1.0, "env": "prod", "flag": true, "obj": {"a": 1}}`)
+	meta := []byte(`{"count": 1.0, "env": "prod", "flag": true, "obj": {"a": 1},` +
+		` "arr": [1, 2.5, "x"], "deep": {"bb": {"c": 1.0}, "a": [null, false]}}`)
 	if err := s.CreateIssue(ctx, &types.Issue{ID: "m-1", Title: "with meta", Metadata: meta}, "tester"); err != nil {
 		t.Fatalf("CreateIssue: %v", err)
 	}
@@ -363,7 +367,12 @@ func TestSearchIssuesMetadataJSONTextComparison(t *testing.T) {
 		{"string unquoted", "env", "prod", 1},
 		{"string quoted does not match", "env", `"prod"`, 0},
 		{"bool JSON text", "flag", "true", 1},
-		{"object compact JSON text", "obj", `{"a":1}`, 1},
+		{"object MySQL spaced text", "obj", `{"a": 1}`, 1},
+		{"object compact JSON text does not match", "obj", `{"a":1}`, 0},
+		{"array MySQL spaced text", "arr", `[1, 2.5, "x"]`, 1},
+		{"array compact JSON text does not match", "arr", `[1,2.5,"x"]`, 0},
+		{"nested keys length-then-lex, integral float as int", "deep", `{"a": [null, false], "bb": {"c": 1}}`, 1},
+		{"nested source key order does not match", "deep", `{"bb": {"c": 1.0}, "a": [null, false]}`, 0},
 		{"missing key", "nope", "x", 0},
 	}
 	for _, tc := range cases {
