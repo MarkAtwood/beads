@@ -64,6 +64,26 @@ type FlatFileStore struct {
 // NewFlatFileStore creates a FlatFileStore rooted at beadsDir (typically ".beads").
 // It creates the required subdirectories if they do not exist.
 func NewFlatFileStore(beadsDir string) (*FlatFileStore, error) {
+	s, err := newFlatFileStoreNoCreate(beadsDir)
+	if err != nil {
+		return nil, err
+	}
+
+	dirs := []string{s.issuesDir, s.commentsDir, s.memoriesDir, s.eventsDir}
+	for _, d := range dirs {
+		if err := os.MkdirAll(d, 0o755); err != nil {
+			return nil, fmt.Errorf("flatfile: create directory %s: %w", d, err)
+		}
+	}
+
+	return s, nil
+}
+
+// newFlatFileStoreNoCreate builds a FlatFileStore without touching the
+// filesystem. Read paths tolerate the missing subdirectories (readDirSafe,
+// loadAllIssues); read-only cross-repo opens use this so they never mutate a
+// foreign checkout (GH#3231).
+func newFlatFileStoreNoCreate(beadsDir string) (*FlatFileStore, error) {
 	abs, err := filepath.Abs(beadsDir)
 	if err != nil {
 		return nil, fmt.Errorf("flatfile: resolve beads dir: %w", err)
@@ -83,13 +103,6 @@ func NewFlatFileStore(beadsDir string) (*FlatFileStore, error) {
 
 		customStatusesPath: filepath.Join(abs, "custom_statuses.json"),
 		customTypesPath:    filepath.Join(abs, "custom_types.json"),
-	}
-
-	dirs := []string{s.issuesDir, s.commentsDir, s.memoriesDir, s.eventsDir}
-	for _, d := range dirs {
-		if err := os.MkdirAll(d, 0o755); err != nil {
-			return nil, fmt.Errorf("flatfile: create directory %s: %w", d, err)
-		}
 	}
 
 	return s, nil

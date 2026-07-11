@@ -32,31 +32,53 @@ func IsFlatFileBackend(beadsDir string) bool {
 // OpenStore creates a FlatFileStore from a beads directory.
 // Returns the store as storage.DoltStorage for use with HookFiringStore.
 func OpenStore(_ context.Context, beadsDir string) (storage.DoltStorage, error) {
+	abs, err := verifyFlatfileMetadata(beadsDir)
+	if err != nil {
+		return nil, err
+	}
+	return NewFlatFileStore(abs)
+}
+
+// OpenStoreReadOnly opens a FlatFileStore without creating any directories.
+// Read-only cross-repo opens must not mutate foreign projects (GH#3231):
+// NewFlatFileStore's MkdirAll would create issues/, comments/, memories/,
+// events/ inside the foreign checkout (a fresh clone lacks the empty ones —
+// git does not track empty dirs) and fails outright on a read-only
+// filesystem. Read paths tolerate the missing subdirectories.
+func OpenStoreReadOnly(_ context.Context, beadsDir string) (storage.DoltStorage, error) {
+	abs, err := verifyFlatfileMetadata(beadsDir)
+	if err != nil {
+		return nil, err
+	}
+	return newFlatFileStoreNoCreate(abs)
+}
+
+// verifyFlatfileMetadata resolves beadsDir and verifies metadata.json
+// declares the flatfile backend, returning the absolute beads dir.
+func verifyFlatfileMetadata(beadsDir string) (string, error) {
 	abs, err := filepath.Abs(beadsDir)
 	if err != nil {
-		return nil, fmt.Errorf("flatfile: resolve path: %w", err)
+		return "", fmt.Errorf("flatfile: resolve path: %w", err)
 	}
 
-	// Verify metadata.json exists and says flatfile.
 	metaPath := filepath.Join(abs, "metadata.json")
 	data, err := os.ReadFile(metaPath)
 	if err != nil {
 		if errors.Is(err, fs.ErrNotExist) {
-			return nil, fmt.Errorf("flatfile: metadata.json not found in %s", abs)
+			return "", fmt.Errorf("flatfile: metadata.json not found in %s", abs)
 		}
-		return nil, fmt.Errorf("flatfile: read metadata: %w", err)
+		return "", fmt.Errorf("flatfile: read metadata: %w", err)
 	}
 	var meta struct {
 		Backend string `json:"backend"`
 	}
 	if err := json.Unmarshal(data, &meta); err != nil {
-		return nil, fmt.Errorf("flatfile: parse metadata: %w", err)
+		return "", fmt.Errorf("flatfile: parse metadata: %w", err)
 	}
 	if meta.Backend != "flatfile" {
-		return nil, fmt.Errorf("flatfile: metadata.json backend is %q, not \"flatfile\"", meta.Backend)
+		return "", fmt.Errorf("flatfile: metadata.json backend is %q, not \"flatfile\"", meta.Backend)
 	}
-
-	return NewFlatFileStore(abs)
+	return abs, nil
 }
 
 // InGitRepo reports whether the directory containing beadsDir is inside a
