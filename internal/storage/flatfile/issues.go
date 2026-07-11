@@ -90,19 +90,29 @@ func (s *FlatFileStore) readIssue(id string) (*types.Issue, error) {
 
 	issue, err := decodeIssue(data)
 	if err != nil {
-		// Attempt to repair non-RFC3339 timestamps (e.g. MySQL datetime
-		// "2026-06-22 14:31:53" instead of "2026-06-22T14:31:53Z"),
-		// anchored to known timestamp fields so user content that merely
-		// looks like a datetime is never rewritten.
-		if repaired := repairIssueTimestamps(data); repaired != nil {
-			if fixed, err2 := decodeIssue(repaired); err2 == nil {
-				return fixed, nil
-			}
+		// Attempt repairs for raw Dolt SQL export artifacts. The two repair
+		// passes CHAIN — a single export row can need both, so the type
+		// repair runs on the timestamp-repaired bytes:
+		//   - non-RFC3339 timestamps (MySQL datetime "2026-06-22 14:31:53"
+		//     instead of "2026-06-22T14:31:53Z"), anchored to known timestamp
+		//     fields so user content that merely looks like a datetime is
+		//     never rewritten;
+		//   - type mismatches: integer booleans (Dolt TINYINT 0/1), object
+		//     dependency metadata (should be string), and unknown column
+		//     names (timeout_ns, content_hash).
+		// Each pass returns nil when it changes nothing, so a file needing
+		// only one repair takes exactly the same path as before.
+		repaired := data
+		anyRepair := false
+		if fixed := repairIssueTimestamps(repaired); fixed != nil {
+			repaired = fixed
+			anyRepair = true
 		}
-		// Attempt to repair type mismatches from raw SQL exports: integer
-		// booleans (Dolt TINYINT 0/1), object dependency metadata (should
-		// be string), and unknown column names (timeout_ns, content_hash).
-		if repaired := repairIssueTypes(data); repaired != nil {
+		if fixed := repairIssueTypes(repaired); fixed != nil {
+			repaired = fixed
+			anyRepair = true
+		}
+		if anyRepair {
 			if fixed, err2 := decodeIssue(repaired); err2 == nil {
 				return fixed, nil
 			}
