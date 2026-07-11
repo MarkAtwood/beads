@@ -433,6 +433,9 @@ func (s *FlatFileStore) UpdateIssue(ctx context.Context, id string, updates map[
 		}
 	}
 
+	// Auto-manage leases when direct updates change status or assignee.
+	manageLeaseOnUpdate(ctx, &oldIssue, issue, updates)
+
 	issue.UpdatedAt = time.Now().UTC()
 	if err := s.writeIssue(issue); err != nil {
 		return err
@@ -442,6 +445,55 @@ func (s *FlatFileStore) UpdateIssue(ctx context.Context, id string, updates map[
 	newData, _ := json.Marshal(updates)
 	eventType := issueops.DetermineEventType(&oldIssue, updates)
 	return s.recordEvent(id, eventType, actor, string(oldData), string(newData))
+}
+
+// manageLeaseOnUpdate mirrors issueops.ManageLeaseOnUpdate: when a generic
+// update lands on in_progress with an assignee, stamp a fresh lease so the
+// reclaim reaper can recover the work if the holder dies; any other resulting
+// status/assignee combination clears stale lease fields. Claim/heartbeat own
+// the normal lease lifecycle, but bd update can transfer or reopen work
+// directly.
+func manageLeaseOnUpdate(ctx context.Context, oldIssue, issue *types.Issue, updates map[string]interface{}) {
+	rawStatus, hasStatus := updates["status"]
+	rawAssignee, hasAssignee := updates["assignee"]
+	if !hasStatus && !hasAssignee {
+		return
+	}
+
+	newStatus := string(oldIssue.Status)
+	if hasStatus {
+		switch v := rawStatus.(type) {
+		case string:
+			newStatus = v
+		case types.Status:
+			newStatus = string(v)
+		default:
+			return // mirrors the SQL helper: unrecognized value, leave leases alone
+		}
+	}
+
+	newAssignee := oldIssue.Assignee
+	if hasAssignee {
+		switch v := rawAssignee.(type) {
+		case nil:
+			newAssignee = ""
+		case string:
+			newAssignee = v
+		default:
+			newAssignee = fmt.Sprint(v)
+		}
+	}
+
+	if newStatus != string(types.StatusInProgress) || newAssignee == "" {
+		issue.LeaseExpiresAt = nil
+		issue.HeartbeatAt = nil
+		return
+	}
+
+	now := time.Now().UTC()
+	expires := now.Add(issueops.LeaseTTL(ctx))
+	issue.LeaseExpiresAt = &expires
+	issue.HeartbeatAt = &now
 }
 
 // updateStatusValue extracts the "status" update value, tolerating both string
