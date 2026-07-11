@@ -382,6 +382,17 @@ func (s *FlatFileStore) GetDependencyTree(_ context.Context, issueID string, max
 		issueMap[issue.ID] = issue
 	}
 
+	// A missing root is an error (issueops.buildDependencyTreeInTx hits
+	// GetIssueInTx's wrapped ErrNotFound) — but only when the walk would
+	// actually visit it: maxDepth <= 0 returns empty before the lookup.
+	// Missing non-root nodes stay silently skipped; SQL never recurses into
+	// them because its hydration join drops them first.
+	if maxDepth > 0 {
+		if _, ok := issueMap[issueID]; !ok {
+			return nil, fmt.Errorf("%w: issue %s", storage.ErrNotFound, issueID)
+		}
+	}
+
 	type edge struct {
 		target  string
 		depType types.DependencyType
