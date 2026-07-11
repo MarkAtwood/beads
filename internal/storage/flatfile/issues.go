@@ -296,6 +296,10 @@ func (s *FlatFileStore) CreateIssue(ctx context.Context, issue *types.Issue, act
 	// derivation (mirrors issueops.PrepareIssueForInsert).
 	prepareIssueDefaults(issue, actor)
 
+	if err := s.validateIssueForInsert(ctx, issue); err != nil {
+		return err
+	}
+
 	if err := s.writeIssue(issue); err != nil {
 		return err
 	}
@@ -313,6 +317,34 @@ func (s *FlatFileStore) CreateIssue(ctx context.Context, issue *types.Issue, act
 		if err := s.recordCommentEvent(issue.ID, issueops.IsWisp(issue), types.EventLabelAdded, actor, "Added label: "+label); err != nil {
 			return err
 		}
+	}
+	return nil
+}
+
+// validateIssueForInsert mirrors the validation half of
+// issueops.PrepareIssueForInsert: metadata schema validation plus
+// Issue.ValidateWithCustom against the configured custom statuses/types.
+// One documented divergence: the flatfile store has always admitted an empty
+// issue_type (SQL rejects it) and its stored data and callers rely on that,
+// so an empty type is checked as the default task type instead.
+func (s *FlatFileStore) validateIssueForInsert(ctx context.Context, issue *types.Issue) error {
+	if err := issueops.ValidateMetadataIfConfigured(issue.Metadata); err != nil {
+		return fmt.Errorf("metadata validation failed for issue %s: %w", issue.ID, err)
+	}
+	customStatuses, err := s.GetCustomStatuses(ctx)
+	if err != nil {
+		return fmt.Errorf("flatfile: get custom statuses for validation: %w", err)
+	}
+	customTypes, err := s.GetCustomTypes(ctx)
+	if err != nil {
+		return fmt.Errorf("flatfile: get custom types for validation: %w", err)
+	}
+	check := *issue
+	if check.IssueType == "" {
+		check.IssueType = types.TypeTask
+	}
+	if err := check.ValidateWithCustom(customStatuses, customTypes); err != nil {
+		return fmt.Errorf("validation failed for issue %s: %w", issue.ID, err)
 	}
 	return nil
 }
