@@ -1363,6 +1363,9 @@ func (s *FlatFileStore) SetRepoMtime(_ context.Context, repoPath, _ string, mtim
 	return s.setKV(s.repoMtimePath, repoPath, fmt.Sprintf("%d", mtimeNs))
 }
 
+// ClearRepoMtime mirrors issueops.ClearRepoMtimeInTx's key asymmetry:
+// Set/Get use the path verbatim, but Clear ~-expands and abs-normalizes it
+// first, so clearing a relative path used to set is a silent no-op.
 func (s *FlatFileStore) ClearRepoMtime(_ context.Context, repoPath string) error {
 	if err := s.checkClosed(); err != nil {
 		return err
@@ -1374,8 +1377,28 @@ func (s *FlatFileStore) ClearRepoMtime(_ context.Context, repoPath string) error
 	if err != nil {
 		return err
 	}
-	delete(kv, repoPath)
+	delete(kv, expandAndAbsPath(repoPath))
 	return s.writeKVFile(s.repoMtimePath, kv)
+}
+
+// expandAndAbsPath mirrors the unexported issueops helper of the same name:
+// ~ expansion, then filepath.Abs, falling back to the input on error.
+func expandAndAbsPath(p string) string {
+	if strings.HasPrefix(p, "~") {
+		home, err := os.UserHomeDir()
+		if err == nil {
+			if p == "~" {
+				p = home
+			} else {
+				p = filepath.Join(home, p[2:])
+			}
+		}
+	}
+	abs, err := filepath.Abs(p)
+	if err != nil {
+		return p
+	}
+	return abs
 }
 
 func (s *FlatFileStore) GetMoleculeProgress(_ context.Context, moleculeID string) (*types.MoleculeProgressStats, error) {

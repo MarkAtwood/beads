@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/steveyegge/beads/internal/storage/issueops"
 	"github.com/steveyegge/beads/internal/types"
 )
 
@@ -101,10 +102,17 @@ func (s *FlatFileStore) GetIssueComments(_ context.Context, issueID string) ([]*
 	return comments, nil
 }
 
-// CountIssueComments returns the number of comments for an issue.
+// CountIssueComments returns the number of comments for an issue. Mirrors the
+// SQL surface's intentional asymmetry: the count queries only the durable
+// `comments` table and is never wisp-routed, so a wisp always reports 0 even
+// though GetIssueComments returns its comments.
 func (s *FlatFileStore) CountIssueComments(_ context.Context, issueID string) (int64, error) {
 	if err := s.checkClosed(); err != nil {
 		return 0, err
+	}
+
+	if issue, err := s.readIssue(issueID); err == nil && issueops.IsWisp(issue) {
+		return 0, nil
 	}
 
 	count, err := s.countCommentFiles(issueID)
