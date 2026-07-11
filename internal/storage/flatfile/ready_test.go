@@ -109,6 +109,75 @@ func TestGetBlockedIssuesParentImplicitDottedChild(t *testing.T) {
 	}
 }
 
+// SQL reference: BuildReadyWorkWhere's MoleculeID clause matches direct
+// parent-child children of the molecule OR dotted-prefix IDs with no
+// parent-child dep; everything else is excluded.
+func TestGetReadyWorkMoleculeID(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+
+	s.CreateIssue(ctx, &types.Issue{ID: "mol-1", Title: "Molecule", IssueType: types.TypeMolecule, Status: types.StatusOpen}, "tester")
+	s.CreateIssue(ctx, &types.Issue{ID: "mc-1", Title: "Explicit member", Status: types.StatusOpen}, "tester")
+	s.AddDependency(ctx, &types.Dependency{IssueID: "mc-1", DependsOnID: "mol-1", Type: types.DepParentChild}, "tester")
+	s.CreateIssue(ctx, &types.Issue{ID: "mol-1.2", Title: "Implicit member", Status: types.StatusOpen}, "tester")
+	s.CreateIssue(ctx, &types.Issue{ID: "mc-9", Title: "Outside molecule", Status: types.StatusOpen}, "tester")
+
+	ready, err := s.GetReadyWork(ctx, types.WorkFilter{MoleculeID: "mol-1"})
+	if err != nil {
+		t.Fatalf("GetReadyWork: %v", err)
+	}
+	got := make(map[string]bool)
+	for _, r := range ready {
+		got[r.ID] = true
+	}
+	if len(ready) != 2 || !got["mc-1"] || !got["mol-1.2"] {
+		t.Errorf("ready = %v, want [mc-1 mol-1.2]", readyIDs(ready))
+	}
+}
+
+// SQL reference: MolType/WispType constrain only the wisp arm of the ready
+// set (issueops.readyWorkWispIssueFilter); the durable-issues arm has no
+// mol_type/wisp_type clause (BuildReadyWorkWhere), so durable issues are
+// returned regardless of the filter.
+func TestGetReadyWorkWispTypeFilters(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+
+	swarm := types.MolTypeSwarm
+	s.CreateIssue(ctx, &types.Issue{ID: "wt-swarm", Title: "Swarm wisp", Status: types.StatusOpen,
+		Ephemeral: true, MolType: types.MolTypeSwarm}, "tester")
+	s.CreateIssue(ctx, &types.Issue{ID: "wt-patrol", Title: "Patrol wisp", Status: types.StatusOpen,
+		Ephemeral: true, MolType: types.MolTypePatrol}, "tester")
+	s.CreateIssue(ctx, &types.Issue{ID: "wt-durable", Title: "Durable", Status: types.StatusOpen}, "tester")
+
+	ready, err := s.GetReadyWork(ctx, types.WorkFilter{MolType: &swarm, IncludeEphemeral: true})
+	if err != nil {
+		t.Fatalf("GetReadyWork: %v", err)
+	}
+	got := make(map[string]bool)
+	for _, r := range ready {
+		got[r.ID] = true
+	}
+	if len(ready) != 2 || !got["wt-swarm"] || !got["wt-durable"] {
+		t.Errorf("ready = %v, want [wt-swarm wt-durable]", readyIDs(ready))
+	}
+
+	heartbeat := types.WispTypeHeartbeat
+	s.CreateIssue(ctx, &types.Issue{ID: "wt-hb", Title: "Heartbeat wisp", Status: types.StatusOpen,
+		Ephemeral: true, WispType: types.WispTypeHeartbeat}, "tester")
+	ready, err = s.GetReadyWork(ctx, types.WorkFilter{WispType: &heartbeat, IncludeEphemeral: true})
+	if err != nil {
+		t.Fatalf("GetReadyWork wisp-type: %v", err)
+	}
+	got = make(map[string]bool)
+	for _, r := range ready {
+		got[r.ID] = true
+	}
+	if len(ready) != 2 || !got["wt-hb"] || !got["wt-durable"] {
+		t.Errorf("ready = %v, want [wt-hb wt-durable]", readyIDs(ready))
+	}
+}
+
 func readyIDs(issues []*types.Issue) []string {
 	ids := make([]string, len(issues))
 	for i, r := range issues {
