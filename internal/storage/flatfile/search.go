@@ -124,7 +124,13 @@ func (s *FlatFileStore) SearchIssuesWithCounts(ctx context.Context, query string
 				depCount++
 			}
 		}
-		commentCount, _ := s.countCommentFiles(issue.ID)
+		// readDirSafe already maps ErrNotExist to zero entries, so any error
+		// here is a real failure (permissions, I/O) and must surface, not
+		// render as 0 comments.
+		commentCount, err := s.countCommentFiles(issue.ID)
+		if err != nil {
+			return nil, fmt.Errorf("count comments for %s: %w", issue.ID, err)
+		}
 		wc := &types.IssueWithCounts{
 			Issue:           issue,
 			DependencyCount: depCount,

@@ -2,6 +2,8 @@ package flatfile
 
 import (
 	"context"
+	"os"
+	"path/filepath"
 	"testing"
 
 	"github.com/steveyegge/beads/internal/types"
@@ -391,5 +393,40 @@ func TestSearchIssuesMetadataInvalidKeyErrors(t *testing.T) {
 	_, err = s.SearchIssues(ctx, "", types.IssueFilter{HasMetadataKey: "1leading-digit"})
 	if err == nil {
 		t.Error("HasMetadataKey with invalid key: want error, got nil")
+	}
+}
+
+// Comment-count I/O failures must surface as an error from
+// SearchIssuesWithCounts, not silently render as CommentCount=0 (SQL backends
+// propagate count-query failures).
+func TestSearchIssuesWithCountsCommentDirUnreadable(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("running as root: permission bits are not enforced")
+	}
+	s := newTestStore(t)
+	if err := s.CreateIssue(ctx, &types.Issue{ID: "c-1", Title: "has comment"}, "tester"); err != nil {
+		t.Fatalf("CreateIssue: %v", err)
+	}
+	if _, err := s.AddIssueComment(ctx, "c-1", "tester", "hello"); err != nil {
+		t.Fatalf("AddIssueComment: %v", err)
+	}
+
+	// Sanity: count works while readable.
+	got, err := s.SearchIssuesWithCounts(ctx, "", types.IssueFilter{})
+	if err != nil {
+		t.Fatalf("SearchIssuesWithCounts: %v", err)
+	}
+	if len(got) != 1 || got[0].CommentCount != 1 {
+		t.Fatalf("CommentCount = %d, want 1", got[0].CommentCount)
+	}
+
+	dir := filepath.Join(s.commentsDir, "c-1")
+	if err := os.Chmod(dir, 0o000); err != nil {
+		t.Fatalf("Chmod: %v", err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(dir, 0o755) })
+
+	if _, err := s.SearchIssuesWithCounts(ctx, "", types.IssueFilter{}); err == nil {
+		t.Error("SearchIssuesWithCounts with unreadable comments dir: want error, got nil")
 	}
 }
