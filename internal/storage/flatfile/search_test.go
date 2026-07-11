@@ -218,3 +218,46 @@ func TestSearchIssuesWithCounts(t *testing.T) {
 		t.Errorf("len = %d, want 2", len(results))
 	}
 }
+
+// SQL parity: invalid label regex/glob must surface as an error, not silently
+// match everything (nil regex) or nothing (glob ErrBadPattern swallowed).
+func TestSearchIssuesInvalidLabelRegexErrors(t *testing.T) {
+	s := newTestStore(t)
+	seedIssues(t, s)
+
+	_, err := s.SearchIssues(ctx, "", types.IssueFilter{LabelRegex: "tech-(debt"})
+	if err == nil {
+		t.Fatal("SearchIssues with unbalanced regex: want error, got nil")
+	}
+}
+
+func TestSearchIssuesInvalidLabelPatternErrors(t *testing.T) {
+	s := newTestStore(t)
+	seedIssues(t, s)
+
+	_, err := s.SearchIssues(ctx, "", types.IssueFilter{LabelPattern: "[a-"})
+	if err == nil {
+		t.Fatal("SearchIssues with malformed glob: want error, got nil")
+	}
+}
+
+func TestSearchIssuesValidLabelRegexAndPattern(t *testing.T) {
+	s := newTestStore(t)
+	seedIssues(t, s)
+
+	got, err := s.SearchIssues(ctx, "", types.IssueFilter{LabelRegex: "^sec"})
+	if err != nil {
+		t.Fatalf("SearchIssues LabelRegex: %v", err)
+	}
+	if len(got) != 1 || got[0].ID != "s-1" {
+		t.Errorf("LabelRegex ^sec: got %d issues, want [s-1]", len(got))
+	}
+
+	got, err = s.SearchIssues(ctx, "", types.IssueFilter{LabelPattern: "u*"})
+	if err != nil {
+		t.Fatalf("SearchIssues LabelPattern: %v", err)
+	}
+	if len(got) != 2 {
+		t.Errorf("LabelPattern u*: got %d issues, want 2 (urgent, ui)", len(got))
+	}
+}
