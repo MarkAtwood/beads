@@ -84,6 +84,65 @@ func makeConflictedMerge(t *testing.T, dir, branch string) {
 	}
 }
 
+// newPeerClone creates a bare peer repo seeded from repoDir (registered there
+// as remote "peer") plus a working clone of it, and returns the clone dir.
+func newPeerClone(t *testing.T, repoDir, branch string) string {
+	t.Helper()
+	bare := filepath.Join(t.TempDir(), "peer.git")
+	gitRun(t, filepath.Dir(bare), "init", "-q", "--bare", "-b", branch, bare)
+	gitRun(t, repoDir, "remote", "add", "peer", bare)
+	gitRun(t, repoDir, "push", "-q", "peer", branch)
+
+	clone := filepath.Join(t.TempDir(), "clone")
+	gitRun(t, filepath.Dir(clone), "clone", "-q", bare, clone)
+	gitRun(t, clone, "config", "user.email", "peer@example.com")
+	gitRun(t, clone, "config", "user.name", "peer")
+	gitRun(t, clone, "config", "commit.gpgsign", "false")
+	return clone
+}
+
+// TASKS-7u7b: a conflicted Sync must leave the unmerged index entries intact
+// (no "git add" sweep) so ResolveConflicts still has stage-2/3 entries to work
+// with, and no conflict-markered JSON is ever staged as resolved.
+func TestSyncConflictPreservesUnmergedPaths(t *testing.T) {
+	ctx := context.Background()
+	s, dir := newGitStore(t, "main")
+	clone := newPeerClone(t, dir, "main")
+
+	// Diverge: peer edits test-1 one way, local another.
+	writeIssueFile(t, clone, "test-1", "peer edit")
+	gitRun(t, clone, "commit", "-q", "-am", "peer edit")
+	gitRun(t, clone, "push", "-q", "origin", "main")
+	writeIssueFile(t, dir, "test-1", "local edit")
+	gitRun(t, dir, "commit", "-q", "-am", "local edit")
+
+	res, err := s.Sync(ctx, "peer", "")
+	if err == nil {
+		t.Fatal("expected Sync to fail with merge conflict")
+	}
+	if len(res.Conflicts) != 1 || res.Conflicts[0].IssueID != "test-1" {
+		t.Fatalf("expected conflict on test-1, got %+v", res.Conflicts)
+	}
+	// Oracle: git's own unmerged-path listing. If Sync had staged .beads/,
+	// this would be empty and resolution would silently no-op.
+	if out := gitRun(t, dir, "diff", "--name-only", "--diff-filter=U"); !strings.Contains(out, "test-1.json") {
+		t.Fatalf("unmerged entry for test-1.json lost after Sync; diff-filter=U = %q", out)
+	}
+	if err := s.ResolveConflicts(ctx, "", "ours"); err != nil {
+		t.Fatalf("ResolveConflicts: %v", err)
+	}
+	if err := s.CommitMergeResolution(ctx, "resolve"); err != nil {
+		t.Fatalf("CommitMergeResolution: %v", err)
+	}
+	data, err := os.ReadFile(filepath.Join(dir, ".beads", "issues", "test-1.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(data), "local edit") || strings.Contains(string(data), "<<<<<<<") {
+		t.Fatalf("ours-resolution did not produce local content: %q", string(data))
+	}
+}
+
 // TASKS-vun8: a pathspec-limited commit is forbidden during a merge; the
 // resolution commit must be a plain commit that concludes the merge
 // (oracle: git itself — MERGE_HEAD must be gone afterwards).
