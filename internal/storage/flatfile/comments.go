@@ -35,25 +35,10 @@ func (s *FlatFileStore) AddIssueComment(_ context.Context, issueID, author, text
 		CreatedAt: now,
 	}
 
-	dir, err := safePath(s.commentsDir, issueID, "")
-	if err != nil {
+	// writeCommentFile embeds the comment ID in the filename, so two
+	// comments created in the same clock tick cannot overwrite each other.
+	if err := s.writeCommentFile(comment); err != nil {
 		return nil, err
-	}
-	if err := os.MkdirAll(dir, 0o755); err != nil {
-		return nil, fmt.Errorf("flatfile: create comments dir: %w", err)
-	}
-
-	filename := now.Format("2006-01-02T15-04-05.000000000Z") + ".json"
-	path := filepath.Join(dir, filename)
-
-	data, err := json.MarshalIndent(comment, "", "  ")
-	if err != nil {
-		return nil, fmt.Errorf("flatfile: marshal comment: %w", err)
-	}
-	data = append(data, '\n')
-
-	if err := atomicWriteFile(path, data); err != nil {
-		return nil, fmt.Errorf("flatfile: write comment: %w", err)
 	}
 
 	return comment, nil
