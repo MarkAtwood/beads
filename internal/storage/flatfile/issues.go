@@ -276,8 +276,14 @@ func (s *FlatFileStore) CreateIssue(ctx context.Context, issue *types.Issue, act
 		issue.ID = id
 	}
 
-	// Check for existing issue with same ID.
-	if _, err := os.Stat(s.issueFilename(issue.ID)); err == nil {
+	// Check for existing issue with same ID. Validate before touching the
+	// filesystem so a traversal-shaped ID surfaces the ID-validation error
+	// instead of probing sibling paths outside the issues dir.
+	existingPath, err := s.safeIssueFilename(issue.ID)
+	if err != nil {
+		return err
+	}
+	if _, err := os.Stat(existingPath); err == nil {
 		return fmt.Errorf("flatfile: issue %s already exists", issue.ID)
 	}
 

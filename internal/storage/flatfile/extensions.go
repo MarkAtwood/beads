@@ -485,7 +485,13 @@ func (s *FlatFileStore) UpdateIssueID(_ context.Context, oldID, newID string, is
 		}
 		return err
 	}
-	if _, err := os.Stat(s.issueFilename(newID)); err == nil {
+	// Validate newID before touching the filesystem so a traversal-shaped ID
+	// surfaces the ID-validation error instead of probing sibling paths.
+	newPath, err := s.safeIssueFilename(newID)
+	if err != nil {
+		return err
+	}
+	if _, err := os.Stat(newPath); err == nil {
 		return fmt.Errorf("flatfile: cannot rename %s to %s: issue already exists", oldID, newID)
 	}
 
