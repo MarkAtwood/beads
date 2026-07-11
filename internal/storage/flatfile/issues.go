@@ -197,13 +197,8 @@ func (s *FlatFileStore) writeIssue(issue *types.Issue) error {
 		return fmt.Errorf("flatfile: marshal issue %s: %w", issue.ID, err)
 	}
 	data = append(data, '\n')
-	tmp := path + ".tmp"
-	if err := os.WriteFile(tmp, data, 0o644); err != nil {
-		return fmt.Errorf("flatfile: write issue tmp %s: %w", issue.ID, err)
-	}
-	if err := os.Rename(tmp, path); err != nil {
-		_ = os.Remove(tmp)
-		return fmt.Errorf("flatfile: rename issue %s: %w", issue.ID, err)
+	if err := atomicWriteFile(path, data); err != nil {
+		return fmt.Errorf("flatfile: write issue %s: %w", issue.ID, err)
 	}
 	return nil
 }

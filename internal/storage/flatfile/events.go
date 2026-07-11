@@ -49,6 +49,10 @@ func (s *FlatFileStore) appendEvent(ev *types.Event) error {
 		_ = f.Close()
 		return fmt.Errorf("flatfile: append event: %w", err)
 	}
+	if err := f.Sync(); err != nil {
+		_ = f.Close()
+		return fmt.Errorf("flatfile: sync events: %w", err)
+	}
 	if err := f.Close(); err != nil {
 		return fmt.Errorf("flatfile: close events: %w", err)
 	}

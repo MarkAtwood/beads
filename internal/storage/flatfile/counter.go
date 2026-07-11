@@ -84,13 +84,8 @@ func (s *FlatFileStore) writeCounter(state *counterState) error {
 	}
 	data = append(data, '\n')
 
-	tmp := s.counterPath + ".tmp"
-	if err := os.WriteFile(tmp, data, 0o644); err != nil {
-		return fmt.Errorf("flatfile: write counter tmp: %w", err)
-	}
-	if err := os.Rename(tmp, s.counterPath); err != nil {
-		_ = os.Remove(tmp)
-		return fmt.Errorf("flatfile: rename counter: %w", err)
+	if err := atomicWriteFile(s.counterPath, data); err != nil {
+		return fmt.Errorf("flatfile: write counter: %w", err)
 	}
 	return nil
 }

@@ -95,13 +95,8 @@ func (s *FlatFileStore) writeKVFile(path string, kv map[string]string) error {
 	}
 	data = append(data, '\n')
 
-	tmp := path + ".tmp"
-	if err := os.WriteFile(tmp, data, 0o644); err != nil {
-		return fmt.Errorf("flatfile: write kv tmp: %w", err)
-	}
-	if err := os.Rename(tmp, path); err != nil {
-		_ = os.Remove(tmp)
-		return fmt.Errorf("flatfile: rename kv: %w", err)
+	if err := atomicWriteFile(path, data); err != nil {
+		return fmt.Errorf("flatfile: write kv %s: %w", path, err)
 	}
 	return nil
 }
@@ -195,13 +190,8 @@ func writeJSONFile(path string, v interface{}) error {
 	}
 	data = append(data, '\n')
 
-	tmp := path + ".tmp"
-	if err := os.WriteFile(tmp, data, 0o644); err != nil {
+	if err := atomicWriteFile(path, data); err != nil {
 		return fmt.Errorf("flatfile: write %s: %w", path, err)
-	}
-	if err := os.Rename(tmp, path); err != nil {
-		_ = os.Remove(tmp)
-		return fmt.Errorf("flatfile: rename %s: %w", path, err)
 	}
 	return nil
 }

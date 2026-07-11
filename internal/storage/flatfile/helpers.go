@@ -49,6 +49,45 @@ func safePath(parentDir, child, ext string) (string, error) {
 	return result, nil
 }
 
+// atomicWriteFile writes data to path durably and atomically: a uniquely-named
+// temp file in the same directory is written, fsynced, closed, chmodded to
+// 0644, then renamed over path. The unique temp name (os.CreateTemp) keeps two
+// concurrent writers of the same path from renaming each other's half-written
+// temp into place; the fsync keeps a crash right after the rename from
+// persisting an empty or truncated file. The directory is deliberately not
+// fsynced: losing the rename itself just resurfaces the previous consistent
+// version, which is acceptable here and avoids doubling the fsync cost.
+func atomicWriteFile(path string, data []byte) error {
+	f, err := os.CreateTemp(filepath.Dir(path), filepath.Base(path)+".tmp-*")
+	if err != nil {
+		return err
+	}
+	tmp := f.Name()
+	if _, err := f.Write(data); err != nil {
+		_ = f.Close()
+		_ = os.Remove(tmp)
+		return err
+	}
+	if err := f.Sync(); err != nil {
+		_ = f.Close()
+		_ = os.Remove(tmp)
+		return err
+	}
+	if err := f.Close(); err != nil {
+		_ = os.Remove(tmp)
+		return err
+	}
+	if err := os.Chmod(tmp, 0o644); err != nil {
+		_ = os.Remove(tmp)
+		return err
+	}
+	if err := os.Rename(tmp, path); err != nil {
+		_ = os.Remove(tmp)
+		return err
+	}
+	return nil
+}
+
 // readDirSafe reads a directory, returning nil (not error) if it doesn't exist.
 func readDirSafe(dir string) ([]os.DirEntry, error) {
 	entries, err := os.ReadDir(dir)

@@ -52,13 +52,8 @@ func (s *FlatFileStore) AddIssueComment(_ context.Context, issueID, author, text
 	}
 	data = append(data, '\n')
 
-	tmp := path + ".tmp"
-	if err := os.WriteFile(tmp, data, 0o644); err != nil {
-		return nil, fmt.Errorf("flatfile: write comment tmp: %w", err)
-	}
-	if err := os.Rename(tmp, path); err != nil {
-		_ = os.Remove(tmp)
-		return nil, fmt.Errorf("flatfile: rename comment: %w", err)
+	if err := atomicWriteFile(path, data); err != nil {
+		return nil, fmt.Errorf("flatfile: write comment: %w", err)
 	}
 
 	return comment, nil
