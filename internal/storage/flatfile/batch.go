@@ -57,7 +57,7 @@ func (s *FlatFileStore) CreateIssuesWithFullOptions(ctx context.Context, issues 
 		}
 	}
 
-	filtered, err := filterMixedBucketDependencies(issues, opts)
+	filtered, err := issueops.FilterCreateIssuesMixedBucketDependencies(issues, opts)
 	if err != nil {
 		return err
 	}
@@ -400,87 +400,6 @@ func checkBatchDependencyCycle(adj map[string][]string, dep *types.Dependency) e
 		return fmt.Errorf("adding dependency would create a cycle")
 	}
 	return nil
-}
-
-// filterMixedBucketDependencies mirrors
-// issueops.filterCreateIssuesMixedBucketDependencies: a batch containing both
-// regular issues and wisps may not carry an in-batch cross-bucket edge; with
-// SkipDependencyValidationErrors the edge is dropped and reported instead.
-func filterMixedBucketDependencies(issues []*types.Issue, opts storage.BatchCreateOptions) ([]*types.Issue, error) {
-	batchWispByID := make(map[string]bool, len(issues))
-	hasRegular := false
-	hasWisp := false
-	for _, issue := range issues {
-		if issue == nil {
-			continue
-		}
-		isWisp := issueops.IsWisp(issue)
-		if isWisp {
-			hasWisp = true
-		} else {
-			hasRegular = true
-		}
-		if issue.ID != "" {
-			batchWispByID[issue.ID] = isWisp
-		}
-	}
-	if !hasRegular || !hasWisp {
-		return issues, nil
-	}
-
-	var filtered []*types.Issue
-	for i, issue := range issues {
-		if issue == nil {
-			continue
-		}
-		var kept []*types.Dependency
-		dropped := false
-		for j, dep := range issue.Dependencies {
-			if dep == nil {
-				if dropped {
-					kept = append(kept, dep)
-				}
-				continue
-			}
-			sourceID := issue.ID
-			sourceIsWisp := issueops.IsWisp(issue)
-			if dep.IssueID != "" {
-				sourceID = dep.IssueID
-				if isWisp, ok := batchWispByID[sourceID]; ok {
-					sourceIsWisp = isWisp
-				}
-			}
-			targetIsWisp, targetInBatch := batchWispByID[dep.DependsOnID]
-			if targetInBatch && sourceIsWisp != targetIsWisp {
-				if !opts.SkipDependencyValidationErrors {
-					return nil, fmt.Errorf("mixed regular/wisp CreateIssues batch cannot include cross-bucket dependency %s -> %s; create the issues first, then add the in-batch dependency after both issues exist", sourceID, dep.DependsOnID)
-				}
-				if !dropped {
-					kept = append([]*types.Dependency(nil), issue.Dependencies[:j]...)
-					dropped = true
-				}
-				if opts.OnSkippedDependency != nil {
-					opts.OnSkippedDependency(sourceID, dep.DependsOnID, "cross-bucket dependency between regular issue and wisp in the same batch")
-				}
-				continue
-			}
-			if dropped {
-				kept = append(kept, dep)
-			}
-		}
-		if dropped {
-			if filtered == nil {
-				filtered = append([]*types.Issue(nil), issues...)
-			}
-			issueCopy := *issue
-			issueCopy.Dependencies = kept
-			filtered[i] = &issueCopy
-		}
-	}
-	if filtered != nil {
-		return filtered, nil
-	}
-	return issues, nil
 }
 
 // dedupeLabels returns labels with duplicates removed, preserving order.
