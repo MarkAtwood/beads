@@ -297,10 +297,28 @@ func (s *FlatFileStore) SlotClear(_ context.Context, issueID, key, actor string)
 // non-force errors and deletes nothing when an external dependent exists),
 // force-orphan reporting, dry-run child-row counts, and FK-cascade cleanup
 // of dependency edges referencing the deleted issues.
-func (s *FlatFileStore) DeleteIssues(_ context.Context, ids []string, cascade bool, force bool, dryRun bool) (*types.DeleteIssuesResult, error) {
+// The multi-file delete runs under runAtomic: the SQL backends wrap
+// issueops.DeleteIssuesInTx in withMutationTx, so a mid-batch failure
+// (I/O error, kill) must delete nothing here too — the pre-image journal
+// restores every removed file, and no survivor is left with dangling edges.
+func (s *FlatFileStore) DeleteIssues(ctx context.Context, ids []string, cascade bool, force bool, dryRun bool) (*types.DeleteIssuesResult, error) {
 	if err := s.checkClosed(); err != nil {
 		return nil, err
 	}
+	var result *types.DeleteIssuesResult
+	err := s.runAtomic(ctx, func() error {
+		var err error
+		// result survives an error return: the orphan guard reports
+		// OrphanedIssues alongside its error, like the SQL reference.
+		result, err = s.deleteIssuesJournaled(ids, cascade, force, dryRun)
+		return err
+	})
+	return result, err
+}
+
+// deleteIssuesJournaled is DeleteIssues' body; the caller has armed the
+// pre-image journal (runAtomic), so any error rolls all removals back.
+func (s *FlatFileStore) deleteIssuesJournaled(ids []string, cascade bool, force bool, dryRun bool) (*types.DeleteIssuesResult, error) {
 	defer s.lockWrite()()
 	if len(ids) == 0 {
 		return &types.DeleteIssuesResult{}, nil
@@ -564,10 +582,27 @@ func (s *FlatFileStore) removeDanglingEdges(all []*types.Issue, deleted map[stri
 // only durable issues match (wisps are never touched), child rows cascade
 // with the issue file, and dependency edges referencing the deleted issues
 // are dropped from survivors (FK ON DELETE CASCADE parity).
-func (s *FlatFileStore) DeleteIssuesBySourceRepo(_ context.Context, sourceRepo string) (int, error) {
+// Runs under runAtomic like DeleteIssues: a mid-batch failure rolls every
+// removal back and reports 0 deleted, matching the SQL tx behavior.
+func (s *FlatFileStore) DeleteIssuesBySourceRepo(ctx context.Context, sourceRepo string) (int, error) {
 	if err := s.checkClosed(); err != nil {
 		return 0, err
 	}
+	var count int
+	err := s.runAtomic(ctx, func() error {
+		var err error
+		count, err = s.deleteBySourceRepoJournaled(sourceRepo)
+		return err
+	})
+	if err != nil {
+		return 0, err // everything was rolled back
+	}
+	return count, nil
+}
+
+// deleteBySourceRepoJournaled is DeleteIssuesBySourceRepo's body; the caller
+// has armed the pre-image journal (runAtomic).
+func (s *FlatFileStore) deleteBySourceRepoJournaled(sourceRepo string) (int, error) {
 	defer s.lockWrite()()
 	all, err := s.loadAllIssues()
 	if err != nil {
