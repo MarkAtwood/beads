@@ -78,6 +78,11 @@ func (s *FlatFileStore) GetReadyWork(ctx context.Context, filter types.WorkFilte
 		if !matchesBasicWorkFilter(issue, filter) {
 			continue
 		}
+		// Metadata predicates mirror sqlbuild.AppendMetadataClauses, which
+		// BuildReadyWorkWhere applies to the ready set.
+		if !matchesMetadataFilter(issue, filter.MetadataFields, filter.HasMetadataKey) {
+			continue
+		}
 		result = append(result, issue)
 	}
 

@@ -2,11 +2,60 @@ package flatfile
 
 import (
 	"context"
+	"encoding/json"
 	"testing"
 	"time"
 
 	"github.com/steveyegge/beads/internal/types"
 )
+
+// SQL reference: BuildReadyWorkWhere routes MetadataFields/HasMetadataKey
+// through sqlbuild.AppendMetadataClauses (JSON_EXTRACT equality / non-NULL),
+// so 'bd ready --metadata-field k=v' and '--has-metadata-key k' narrow the
+// ready set on dolt/sqlite. Flatfile must match.
+func TestGetReadyWorkMetadataFilters(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+
+	s.CreateIssue(ctx, &types.Issue{ID: "md-1", Title: "Core", Status: types.StatusOpen,
+		Metadata: json.RawMessage(`{"team":"core","shard":7}`)}, "tester")
+	s.CreateIssue(ctx, &types.Issue{ID: "md-2", Title: "Infra", Status: types.StatusOpen,
+		Metadata: json.RawMessage(`{"team":"infra"}`)}, "tester")
+	s.CreateIssue(ctx, &types.Issue{ID: "md-3", Title: "No metadata", Status: types.StatusOpen}, "tester")
+
+	ready, err := s.GetReadyWork(ctx, types.WorkFilter{MetadataFields: map[string]string{"team": "core"}})
+	if err != nil {
+		t.Fatalf("GetReadyWork metadata-field: %v", err)
+	}
+	if len(ready) != 1 || ready[0].ID != "md-1" {
+		t.Errorf("metadata-field team=core: got %v, want [md-1]", readyIDs(ready))
+	}
+
+	ready, err = s.GetReadyWork(ctx, types.WorkFilter{HasMetadataKey: "shard"})
+	if err != nil {
+		t.Fatalf("GetReadyWork has-metadata-key: %v", err)
+	}
+	if len(ready) != 1 || ready[0].ID != "md-1" {
+		t.Errorf("has-metadata-key shard: got %v, want [md-1]", readyIDs(ready))
+	}
+
+	// No metadata filter still returns everything.
+	ready, err = s.GetReadyWork(ctx, types.WorkFilter{})
+	if err != nil {
+		t.Fatalf("GetReadyWork unfiltered: %v", err)
+	}
+	if len(ready) != 3 {
+		t.Errorf("unfiltered: got %v, want 3 issues", readyIDs(ready))
+	}
+}
+
+func readyIDs(issues []*types.Issue) []string {
+	ids := make([]string, len(issues))
+	for i, r := range issues {
+		ids[i] = r.ID
+	}
+	return ids
+}
 
 // SQL reference (sqlbuild.BuildReadyWorkWhere): an explicit Status filter is
 // applied verbatim, and the deferred clause is only

@@ -493,35 +493,8 @@ func matchesFilter(issue *types.Issue, f types.IssueFilter, labelRe *regexp.Rege
 	}
 
 	// Metadata
-	if len(f.MetadataFields) > 0 && len(issue.Metadata) > 0 {
-		var meta map[string]interface{}
-		if json.Unmarshal(issue.Metadata, &meta) == nil {
-			for k, v := range f.MetadataFields {
-				mv, ok := meta[k]
-				if !ok {
-					return false
-				}
-				if fmt.Sprintf("%v", mv) != v {
-					return false
-				}
-			}
-		} else {
-			return false
-		}
-	} else if len(f.MetadataFields) > 0 {
+	if !matchesMetadataFilter(issue, f.MetadataFields, f.HasMetadataKey) {
 		return false
-	}
-	if f.HasMetadataKey != "" {
-		if len(issue.Metadata) == 0 {
-			return false
-		}
-		var meta map[string]interface{}
-		if json.Unmarshal(issue.Metadata, &meta) != nil {
-			return false
-		}
-		if _, ok := meta[f.HasMetadataKey]; !ok {
-			return false
-		}
 	}
 
 	// Parent filtering — requires scanning deps for parent-child type.
@@ -556,6 +529,36 @@ func sortIssues(issues []*types.Issue, sortBy string, desc bool) {
 	sort.Slice(issues, func(i, j int) bool {
 		return sqlbuild.Less(issues[i], issues[j], sortBy, desc)
 	})
+}
+
+// matchesMetadataFilter applies the metadata predicates shared by the search
+// and ready paths, mirroring sqlbuild.AppendMetadataClauses: every
+// MetadataFields entry must equal the issue's top-level JSON value, and
+// HasMetadataKey must be present. An issue with no (or unparseable) metadata
+// matches only when no predicate is set (JSON_EXTRACT on NULL yields NULL).
+func matchesMetadataFilter(issue *types.Issue, fields map[string]string, hasKey string) bool {
+	if len(fields) == 0 && hasKey == "" {
+		return true
+	}
+	if len(issue.Metadata) == 0 {
+		return false
+	}
+	var meta map[string]interface{}
+	if json.Unmarshal(issue.Metadata, &meta) != nil {
+		return false
+	}
+	for k, v := range fields {
+		mv, ok := meta[k]
+		if !ok || fmt.Sprintf("%v", mv) != v {
+			return false
+		}
+	}
+	if hasKey != "" {
+		if _, ok := meta[hasKey]; !ok {
+			return false
+		}
+	}
+	return true
 }
 
 func containsCI(s, substr string) bool {
