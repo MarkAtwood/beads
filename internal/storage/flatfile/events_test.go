@@ -125,6 +125,56 @@ func TestGetAllEventsSinceSkipsStrayDotfiles(t *testing.T) {
 	}
 }
 
+// SQL reference semantics: CountEvents on both sqlkit and dolt is a bare
+// `SELECT count(*) FROM events` — durable table only, never wisp-routed — so
+// a wisp issue always counts 0 even though GetEvents (which IS wisp-routed)
+// returns its events. Flatfile stores both kinds in one JSONL file and must
+// replicate the asymmetry, as CountIssueComments already does.
+func TestCountEventsWispReportsZero(t *testing.T) {
+	s := newTestStore(t)
+
+	wisp := &types.Issue{ID: "wispcnt-1", Title: "Wisp", Priority: 2, Ephemeral: true}
+	if err := s.CreateIssue(ctx, wisp, "tester"); err != nil {
+		t.Fatalf("CreateIssue: %v", err)
+	}
+	if err := s.recordEvent("wispcnt-1", types.EventUpdated, "tester", "old", "new"); err != nil {
+		t.Fatalf("recordEvent: %v", err)
+	}
+
+	events, err := s.GetEvents(ctx, "wispcnt-1", 0)
+	if err != nil {
+		t.Fatalf("GetEvents: %v", err)
+	}
+	if len(events) == 0 {
+		t.Fatal("wisp has no events; test needs at least one to prove the count is zeroed")
+	}
+
+	n, err := s.CountEvents(ctx, "wispcnt-1", 0)
+	if err != nil {
+		t.Fatalf("CountEvents: %v", err)
+	}
+	if n != 0 {
+		t.Errorf("CountEvents(wisp) = %d, want 0: SQL backends count only the durable events table", n)
+	}
+
+	// Durable issues keep their real count.
+	durable := &types.Issue{ID: "durcnt-1", Title: "Durable", Priority: 2}
+	if err := s.CreateIssue(ctx, durable, "tester"); err != nil {
+		t.Fatalf("CreateIssue durable: %v", err)
+	}
+	dn, err := s.CountEvents(ctx, "durcnt-1", 0)
+	if err != nil {
+		t.Fatalf("CountEvents durable: %v", err)
+	}
+	devents, err := s.GetEvents(ctx, "durcnt-1", 0)
+	if err != nil {
+		t.Fatalf("GetEvents durable: %v", err)
+	}
+	if dn == 0 || dn != int64(len(devents)) {
+		t.Errorf("CountEvents(durable) = %d, want %d (nonzero)", dn, len(devents))
+	}
+}
+
 // Audit-order semantics: JSONL append order is true insertion order, so
 // events sharing a CreatedAt (coarse clocks, created+label bursts) must come
 // back in insertion order deterministically, not scrambled by an unstable
