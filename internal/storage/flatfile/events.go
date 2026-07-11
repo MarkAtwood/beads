@@ -2,10 +2,12 @@ package flatfile
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -41,6 +43,12 @@ func (s *FlatFileStore) appendEvent(ev *types.Event) error {
 		return fmt.Errorf("flatfile: marshal event: %w", err)
 	}
 	data = append(data, '\n')
+	// If a crash mid-append left a torn final line without a newline,
+	// start on a fresh line so the torn fragment corrupts only itself,
+	// not this event too. The reader skips the fragment.
+	if !fileEndsWithNewline(path) {
+		data = append([]byte{'\n'}, data...)
+	}
 	f, err := os.OpenFile(path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
 	if err != nil {
 		return fmt.Errorf("flatfile: open events for append: %w", err)
@@ -88,6 +96,26 @@ func (s *FlatFileStore) recordCommentEvent(issueID string, isWisp bool, eventTyp
 		ev.NewValue = &empty
 	}
 	return s.appendEvent(ev)
+}
+
+// fileEndsWithNewline reports whether path's last byte is '\n'. Missing or
+// empty files count as newline-terminated (nothing to heal). Read errors also
+// return true: appendEvent will surface real I/O problems itself.
+func fileEndsWithNewline(path string) bool {
+	fi, err := os.Stat(path)
+	if err != nil || fi.Size() == 0 {
+		return true
+	}
+	f, err := os.Open(path)
+	if err != nil {
+		return true
+	}
+	defer f.Close()
+	var b [1]byte
+	if _, err := f.ReadAt(b[:], fi.Size()-1); err != nil {
+		return true
+	}
+	return b[0] == '\n'
 }
 
 // safeEventFilename validates the issue ID before constructing the path.
@@ -185,21 +213,31 @@ func (s *FlatFileStore) readEventsFile(issueID string) ([]*types.Event, error) {
 	}
 	defer f.Close()
 
+	// bufio.Reader instead of bufio.Scanner: events embed full issue
+	// snapshots (description, design, notes), which routinely exceed
+	// Scanner's 64KB default token limit; Reader has no line-length cap.
 	var events []*types.Event
-	scanner := bufio.NewScanner(f)
-	for scanner.Scan() {
-		line := scanner.Bytes()
-		if len(line) == 0 {
-			continue
+	r := bufio.NewReader(f)
+	for lineNo := 1; ; lineNo++ {
+		line, readErr := r.ReadBytes('\n')
+		line = bytes.TrimSuffix(line, []byte("\n"))
+		if len(line) > 0 {
+			var ev types.Event
+			if err := json.Unmarshal(line, &ev); err != nil {
+				// Events are audit data: tolerate a corrupt line (torn
+				// append after a crash) so the readable events survive,
+				// mirroring loadAllIssues' skip-and-warn posture.
+				fmt.Fprintf(os.Stderr, "warning: skipping corrupt event line %d in %s: %v\n", lineNo, path, err)
+			} else {
+				events = append(events, &ev)
+			}
 		}
-		var ev types.Event
-		if err := json.Unmarshal(line, &ev); err != nil {
-			return nil, fmt.Errorf("flatfile: unmarshal event: %w", err)
+		if readErr != nil {
+			if errors.Is(readErr, io.EOF) {
+				break
+			}
+			return nil, fmt.Errorf("flatfile: scan events: %w", readErr)
 		}
-		events = append(events, &ev)
-	}
-	if err := scanner.Err(); err != nil {
-		return nil, fmt.Errorf("flatfile: scan events: %w", err)
 	}
 	return events, nil
 }
