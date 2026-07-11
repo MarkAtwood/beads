@@ -17,6 +17,32 @@ import (
 	"github.com/steveyegge/beads/internal/types"
 )
 
+// flatfileMigrationGitignore is the .beads/.gitignore written by the forward
+// migration. Unlike the fresh-init flat-file gitignore (init.go), it keeps
+// the Dolt data and runtime patterns from doctor.GitignoreTemplate: the Dolt
+// directories stay on disk until the user removes them, and the flat-file
+// auto-commit runs 'git add .beads/' after every mutating command — without
+// these patterns the first post-migration commit would bake the entire Dolt
+// binary database into git history.
+const flatfileMigrationGitignore = `local_metadata.json
+*.tmp
+merge_slot.json
+repo_mtime.json
+
+# Dolt leftovers from before 'bd migrate flatfile' — kept ignored so
+# auto-commit never stages the old Dolt database or its runtime files.
+# Safe to drop these patterns once the directories are removed.
+dolt/
+embeddeddolt/
+proxieddb/
+bd.sock
+bd.sock.startlock
+daemon.*
+*.lock
+dolt-server.pid
+dolt-server.log
+`
+
 var migrateFlatfileCmd = &cobra.Command{
 	Use:   "flatfile",
 	Short: "Migrate between Dolt and flat-file storage",
@@ -201,8 +227,7 @@ either migration can be retried, and can be removed afterwards.`,
 
 		// Update .gitignore for flat-file.
 		gitignorePath := filepath.Join(beadsDir, ".gitignore")
-		flatfileGitignore := "local_metadata.json\n*.tmp\nmerge_slot.json\nrepo_mtime.json\n"
-		if err := os.WriteFile(gitignorePath, []byte(flatfileGitignore), 0o644); err != nil {
+		if err := os.WriteFile(gitignorePath, []byte(flatfileMigrationGitignore), 0o644); err != nil {
 			fmt.Fprintf(os.Stderr, "Warning: failed to update .gitignore: %v\n", err)
 		}
 
