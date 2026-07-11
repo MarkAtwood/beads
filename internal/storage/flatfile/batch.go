@@ -84,7 +84,16 @@ func (s *FlatFileStore) createIssuesBatch(ctx context.Context, issues []*types.I
 		return err
 	}
 
-	configPrefix, _ := s.GetConfig(ctx, "issue_prefix")
+	// A failed issue_prefix read (corrupt config_kv.json, EACCES) aborts the
+	// batch with the real cause, mirroring issueops.NewBatchContext →
+	// ReadConfigPrefix; swallowing it would misdiagnose every explicit ID as
+	// a prefix-validation failure against an empty prefix. A missing key is
+	// still ("", nil). The allowed_prefixes swallow IS parity: SQL discards
+	// that scan error too.
+	configPrefix, err := s.GetConfig(ctx, "issue_prefix")
+	if err != nil {
+		return fmt.Errorf("failed to get config: %w", err)
+	}
 	allowedPrefixes, _ := s.GetConfig(ctx, "allowed_prefixes")
 
 	// Read once per batch and reused for every issue, mirroring
