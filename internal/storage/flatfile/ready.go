@@ -256,7 +256,13 @@ func (s *FlatFileStore) GetReadyWorkWithCounts(ctx context.Context, filter types
 				dc++
 			}
 		}
-		cc, _ := s.countCommentFiles(issue.ID)
+		// I/O failures must surface, not report CommentCount=0: the SQL
+		// reference propagates errors from the comment-count subquery, and
+		// loadAllIssues treats read errors as fatal for the same reason.
+		cc, err := s.countCommentFiles(issue.ID)
+		if err != nil {
+			return nil, err
+		}
 		wc := &types.IssueWithCounts{
 			Issue:           issue,
 			DependencyCount: dc,
