@@ -2,6 +2,8 @@ package flatfile
 
 import (
 	"context"
+	"errors"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"testing"
@@ -10,10 +12,17 @@ import (
 )
 
 // mustSymlink creates a symlink or skips the test on platforms where symlink
-// creation is unavailable (e.g. Windows without the required privilege).
+// creation is unavailable (e.g. Windows without the required privilege). A
+// collision with an existing file is a test bug, not a platform limitation,
+// and fails instead of skipping: an EEXIST-triggered skip silently disabled
+// the symlink regressions on every platform once CreateIssue started
+// recording an event file at the path a test wanted to link.
 func mustSymlink(t *testing.T, target, link string) {
 	t.Helper()
 	if err := os.Symlink(target, link); err != nil {
+		if errors.Is(err, fs.ErrExist) {
+			t.Fatalf("symlink collision (not a platform limitation): %v", err)
+		}
 		t.Skipf("symlinks unavailable: %v", err)
 	}
 }
@@ -190,6 +199,12 @@ func TestSymlinkEscapeBlockedOnWrite(t *testing.T) {
 	// event must fail and must not modify the target.
 	victim := filepath.Join(outside, "victim")
 	if err := os.WriteFile(victim, []byte("original\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	// CreateIssue recorded a creation event, so the events file already
+	// exists; remove it so the symlink takes its place — in the checkout
+	// threat model the committed link IS what materializes at that path.
+	if err := os.Remove(filepath.Join(s.eventsDir, "TEST-1.jsonl")); err != nil {
 		t.Fatal(err)
 	}
 	mustSymlink(t, victim, filepath.Join(s.eventsDir, "TEST-1.jsonl"))
