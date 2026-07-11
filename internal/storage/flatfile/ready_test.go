@@ -209,6 +209,26 @@ func TestGetReadyWorkLabelsAnyOnlyFiltersEphemeral(t *testing.T) {
 	}
 }
 
+// SQL reference: sqlbuild.BuildReadyWorkWhere and
+// issueops.readyWorkWispIssueFilter both use else-if precedence — when
+// Unassigned is set, Assignee is ignored and unassigned issues are returned.
+func TestGetReadyWorkUnassignedPrecedesAssignee(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+
+	s.CreateIssue(ctx, &types.Issue{ID: "ua-1", Title: "Assigned", Status: types.StatusOpen, Assignee: "alice"}, "tester")
+	s.CreateIssue(ctx, &types.Issue{ID: "ua-2", Title: "Unassigned", Status: types.StatusOpen}, "tester")
+
+	alice := "alice"
+	ready, err := s.GetReadyWork(ctx, types.WorkFilter{Unassigned: true, Assignee: &alice})
+	if err != nil {
+		t.Fatalf("GetReadyWork: %v", err)
+	}
+	if len(ready) != 1 || ready[0].ID != "ua-2" {
+		t.Errorf("ready = %v, want [ua-2] (Unassigned wins over Assignee)", readyIDs(ready))
+	}
+}
+
 func readyIDs(issues []*types.Issue) []string {
 	ids := make([]string, len(issues))
 	for i, r := range issues {

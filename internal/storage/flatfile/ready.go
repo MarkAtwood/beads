@@ -422,10 +422,14 @@ func matchesBasicWorkFilter(issue *types.Issue, f types.WorkFilter) bool {
 	if f.Priority != nil && issue.Priority != *f.Priority {
 		return false
 	}
-	if f.Assignee != nil && issue.Assignee != *f.Assignee {
-		return false
-	}
-	if f.Unassigned && issue.Assignee != "" {
+	// Unassigned takes precedence over Assignee, mirroring the else-if in
+	// sqlbuild.BuildReadyWorkWhere and issueops.readyWorkWispIssueFilter:
+	// when both are set, SQL ignores Assignee entirely.
+	if f.Unassigned {
+		if issue.Assignee != "" {
+			return false
+		}
+	} else if f.Assignee != nil && issue.Assignee != *f.Assignee {
 		return false
 	}
 	if len(f.Labels) > 0 {
