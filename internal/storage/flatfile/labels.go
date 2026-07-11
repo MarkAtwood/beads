@@ -2,8 +2,10 @@ package flatfile
 
 import (
 	"context"
+	"errors"
 	"sort"
 
+	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/storage/issueops"
 	"github.com/steveyegge/beads/internal/types"
 )
@@ -75,13 +77,18 @@ func (s *FlatFileStore) RemoveLabel(_ context.Context, issueID, label, actor str
 	return s.recordCommentEvent(issueID, issueops.IsWisp(issue), types.EventLabelRemoved, actor, "Removed label: "+label)
 }
 
-// GetLabels returns the labels for an issue.
+// GetLabels returns the labels for an issue. A missing issue yields an empty
+// list, not an error: issueops.GetLabelsInTx is a bare SELECT on the labels
+// table, so SQL backends return zero rows for unknown IDs.
 func (s *FlatFileStore) GetLabels(_ context.Context, issueID string) ([]string, error) {
 	if err := s.checkClosed(); err != nil {
 		return nil, err
 	}
 
 	issue, err := s.readIssue(issueID)
+	if errors.Is(err, storage.ErrNotFound) {
+		return []string{}, nil
+	}
 	if err != nil {
 		return nil, err
 	}
