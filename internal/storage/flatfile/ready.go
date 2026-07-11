@@ -78,6 +78,23 @@ func readyWorkFromSnapshot(all []*types.Issue, filter types.WorkFilter) []*types
 			if filter.WispType != nil && issue.WispType != *filter.WispType {
 				continue
 			}
+			// LabelsAny likewise constrains only the wisp arm:
+			// issueops.readyWorkWispIssueFilter copies it into the wisp
+			// IssueFilter (at-least-one-label OR semantics), while
+			// BuildReadyWorkWhere never reads it for durable issues.
+			if len(filter.LabelsAny) > 0 {
+				labelSet := makeStringSet(issue.Labels)
+				found := false
+				for _, l := range filter.LabelsAny {
+					if labelSet[l] {
+						found = true
+						break
+					}
+				}
+				if !found {
+					continue
+				}
+			}
 		}
 		if filter.Type != "" {
 			if string(issue.IssueType) != filter.Type {

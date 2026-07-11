@@ -178,6 +178,37 @@ func TestGetReadyWorkWispTypeFilters(t *testing.T) {
 	}
 }
 
+// SQL reference: issueops.readyWorkWispIssueFilter copies WorkFilter.LabelsAny
+// into the wisp arm's IssueFilter (issue must carry at least one of the
+// labels), while BuildReadyWorkWhere never applies LabelsAny to the durable
+// arm. So `bd ready --include-ephemeral` with directory labels keeps only
+// in-scope wisps but all durable issues.
+func TestGetReadyWorkLabelsAnyOnlyFiltersEphemeral(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+
+	s.CreateIssue(ctx, &types.Issue{ID: "la-durable", Title: "Durable no label", Status: types.StatusOpen}, "tester")
+	s.CreateIssue(ctx, &types.Issue{ID: "la-wisp-in", Title: "Wisp in scope", Status: types.StatusOpen,
+		Ephemeral: true, Labels: []string{"dir:svc"}}, "tester")
+	s.CreateIssue(ctx, &types.Issue{ID: "la-wisp-out", Title: "Wisp out of scope", Status: types.StatusOpen,
+		Ephemeral: true, Labels: []string{"dir:other"}}, "tester")
+
+	ready, err := s.GetReadyWork(ctx, types.WorkFilter{
+		IncludeEphemeral: true,
+		LabelsAny:        []string{"dir:svc", "dir:svc2"},
+	})
+	if err != nil {
+		t.Fatalf("GetReadyWork: %v", err)
+	}
+	got := make(map[string]bool)
+	for _, r := range ready {
+		got[r.ID] = true
+	}
+	if len(ready) != 2 || !got["la-durable"] || !got["la-wisp-in"] {
+		t.Errorf("ready = %v, want [la-durable la-wisp-in]", readyIDs(ready))
+	}
+}
+
 func readyIDs(issues []*types.Issue) []string {
 	ids := make([]string, len(issues))
 	for i, r := range issues {
