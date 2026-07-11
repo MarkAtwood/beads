@@ -255,6 +255,22 @@ func (s *FlatFileStore) CreateIssue(ctx context.Context, issue *types.Issue, act
 	s.writeMu.Lock()
 	defer s.writeMu.Unlock()
 
+	// Shared with the batch path: metadata/field validation plus
+	// timestamp/status defaults and closed_at derivation (mirrors
+	// issueops.PrepareIssueForInsert). Runs before ID generation, matching
+	// the SQL path's validate-then-generate order.
+	customStatuses, err := s.GetCustomStatuses(ctx)
+	if err != nil {
+		return fmt.Errorf("failed to get custom statuses: %w", err)
+	}
+	customTypes, err := s.GetCustomTypes(ctx)
+	if err != nil {
+		return fmt.Errorf("failed to get custom types: %w", err)
+	}
+	if err := prepareAndValidateIssue(issue, actor, customStatuses, customTypes); err != nil {
+		return err
+	}
+
 	// Generate ID if not provided.
 	if issue.ID == "" {
 		prefix, _ := s.GetConfig(ctx, "issue_prefix")
@@ -265,9 +281,6 @@ func (s *FlatFileStore) CreateIssue(ctx context.Context, issue *types.Issue, act
 			prefix = issue.PrefixOverride
 		} else if issue.IDPrefix != "" {
 			prefix = prefix + "-" + issue.IDPrefix
-		}
-		if issue.CreatedAt.IsZero() {
-			issue.CreatedAt = time.Now().UTC()
 		}
 		id, err := s.generateID(prefix, issue, actor)
 		if err != nil {
@@ -286,10 +299,6 @@ func (s *FlatFileStore) CreateIssue(ctx context.Context, issue *types.Issue, act
 	if _, err := os.Stat(existingPath); err == nil {
 		return fmt.Errorf("flatfile: issue %s already exists", issue.ID)
 	}
-
-	// Shared with the batch path: timestamp/status defaults and closed_at
-	// derivation (mirrors issueops.PrepareIssueForInsert).
-	prepareIssueDefaults(issue, actor)
 
 	if err := s.writeIssue(issue); err != nil {
 		return err
