@@ -3,7 +3,6 @@ package flatfile
 import (
 	"context"
 	"sort"
-	"time"
 
 	"github.com/steveyegge/beads/internal/storage/issueops"
 	"github.com/steveyegge/beads/internal/types"
@@ -31,8 +30,11 @@ func (s *FlatFileStore) AddLabel(_ context.Context, issueID, label, actor string
 		}
 	}
 	if !present {
+		// No UpdatedAt bump: label ops never touch issues.updated_at on
+		// the SQL backends (AddLabelInTx only inserts the label row and
+		// event), so bumping here would create per-backend drift in
+		// updated-since filters and sync diffing.
 		issue.Labels = append(issue.Labels, label)
-		issue.UpdatedAt = time.Now().UTC()
 		if err := s.writeIssue(issue); err != nil {
 			return err
 		}
@@ -64,8 +66,8 @@ func (s *FlatFileStore) RemoveLabel(_ context.Context, issueID, label, actor str
 		filtered = append(filtered, l)
 	}
 	if removed {
+		// No UpdatedAt bump — see AddLabel.
 		issue.Labels = filtered
-		issue.UpdatedAt = time.Now().UTC()
 		if err := s.writeIssue(issue); err != nil {
 			return err
 		}
