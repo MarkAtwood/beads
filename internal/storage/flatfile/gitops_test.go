@@ -84,6 +84,20 @@ func makeConflictedMerge(t *testing.T, dir, branch string) {
 	}
 }
 
+// TASKS-pqek: a url beginning with '-' would be parsed by git as an option;
+// AddRemote must reject it before invoking git.
+func TestAddRemoteRejectsFlagURL(t *testing.T) {
+	ctx := context.Background()
+	s, dir := newGitStore(t, "main")
+
+	if err := s.AddRemote(ctx, "origin", "--mirror=fetch"); err == nil {
+		t.Fatal("AddRemote accepted a flag-shaped url")
+	}
+	if out := gitRun(t, dir, "remote"); out != "" {
+		t.Fatalf("remote was configured despite rejection: %q", out)
+	}
+}
+
 // TASKS-m49g: git failures (here: not a git repository at all) must surface
 // as errors, not collapse into "empty history / clean status / no remotes".
 func TestReadPathsPropagateGitFailures(t *testing.T) {

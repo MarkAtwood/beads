@@ -385,6 +385,9 @@ func (s *FlatFileStore) AddRemote(ctx context.Context, name, url string) error {
 	if err := validateGitArg("remote name", name); err != nil {
 		return err
 	}
+	if err := validateGitArg("remote url", url); err != nil {
+		return err
+	}
 	_, err := s.git(ctx, "remote", "add", name, url)
 	return err
 }
