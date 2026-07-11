@@ -43,6 +43,11 @@ func (s *FlatFileStore) appendEvent(ev *types.Event) error {
 		return fmt.Errorf("flatfile: marshal event: %w", err)
 	}
 	data = append(data, '\n')
+	// Journal the pre-image first so a failed transaction can restore
+	// this events file to its prior contents.
+	if err := s.journalPreImage(path); err != nil {
+		return err
+	}
 	// If a crash mid-append left a torn final line without a newline,
 	// start on a fresh line so the torn fragment corrupts only itself,
 	// not this event too. The reader skips the fragment.

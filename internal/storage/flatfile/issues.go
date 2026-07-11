@@ -298,7 +298,7 @@ func (s *FlatFileStore) writeIssue(issue *types.Issue) error {
 		return fmt.Errorf("flatfile: marshal issue %s: %w", issue.ID, err)
 	}
 	data = append(data, '\n')
-	if err := atomicWriteFile(path, data); err != nil {
+	if err := s.atomicWrite(path, data); err != nil {
 		return fmt.Errorf("flatfile: write issue %s: %w", issue.ID, err)
 	}
 	return nil
@@ -703,7 +703,7 @@ func (s *FlatFileStore) DeleteIssue(_ context.Context, id string) error {
 	if err != nil {
 		return err
 	}
-	if err := os.Remove(path); err != nil {
+	if err := s.removeFile(path); err != nil {
 		if errors.Is(err, fs.ErrNotExist) {
 			return storage.ErrNotFound
 		}

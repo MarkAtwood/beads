@@ -1,6 +1,7 @@
 package flatfile
 
 import (
+	"errors"
 	"testing"
 
 	"github.com/steveyegge/beads/internal/storage"
@@ -16,6 +17,104 @@ func txForTest(t *testing.T, s *FlatFileStore, fn func(tx storage.Transaction)) 
 	})
 	if err != nil {
 		t.Fatalf("RunInTransaction: %v", err)
+	}
+}
+
+// storage.RunInTransaction contract (storage.go): "If any operation returns
+// an error, the transaction is rolled back" — operations "must either all
+// succeed or all fail". SQL backends get this from sql.Tx; flat-file must
+// restore pre-images. Every mutation class a transaction can make is
+// exercised: update, create, delete, comment, label, dependency, metadata.
+func TestRunInTransactionRollsBackOnError(t *testing.T) {
+	s := newTestStore(t)
+
+	for _, id := range []string{"test-1", "test-2"} {
+		if err := s.CreateIssue(ctx, &types.Issue{ID: id, Title: "before-" + id}, "t"); err != nil {
+			t.Fatalf("CreateIssue(%s): %v", id, err)
+		}
+	}
+	preEvents, err := s.GetEvents(ctx, "test-1", 0)
+	if err != nil {
+		t.Fatalf("GetEvents: %v", err)
+	}
+
+	sentinel := errors.New("boom")
+	err = s.RunInTransaction(ctx, "test", func(tx storage.Transaction) error {
+		if err := tx.UpdateIssue(ctx, "test-1", map[string]interface{}{"title": "after"}, "t"); err != nil {
+			return err
+		}
+		if err := tx.CreateIssue(ctx, &types.Issue{ID: "test-3", Title: "new in tx"}, "t"); err != nil {
+			return err
+		}
+		if err := tx.DeleteIssue(ctx, "test-2"); err != nil {
+			return err
+		}
+		if err := tx.AddComment(ctx, "test-1", "t", "tx comment"); err != nil {
+			return err
+		}
+		if err := tx.AddLabel(ctx, "test-1", "tx-label", "t"); err != nil {
+			return err
+		}
+		if err := tx.SetMetadata(ctx, "tx-key", "tx-value"); err != nil {
+			return err
+		}
+		return sentinel
+	})
+	if !errors.Is(err, sentinel) {
+		t.Fatalf("RunInTransaction error = %v, want sentinel", err)
+	}
+
+	got, err := s.GetIssue(ctx, "test-1")
+	if err != nil {
+		t.Fatalf("GetIssue(test-1): %v", err)
+	}
+	if got.Title != "before-test-1" {
+		t.Errorf("test-1 title = %q, want %q (update not rolled back)", got.Title, "before-test-1")
+	}
+	if len(got.Labels) != 0 {
+		t.Errorf("test-1 labels = %v, want none (label add not rolled back)", got.Labels)
+	}
+	if _, err := s.GetIssue(ctx, "test-3"); !errors.Is(err, storage.ErrNotFound) {
+		t.Errorf("GetIssue(test-3) err = %v, want ErrNotFound (create not rolled back)", err)
+	}
+	if _, err := s.GetIssue(ctx, "test-2"); err != nil {
+		t.Errorf("GetIssue(test-2) err = %v, want restored (delete not rolled back)", err)
+	}
+	comments, err := s.GetIssueComments(ctx, "test-1")
+	if err != nil {
+		t.Fatalf("GetIssueComments: %v", err)
+	}
+	if len(comments) != 0 {
+		t.Errorf("test-1 comments = %d, want 0 (comment not rolled back)", len(comments))
+	}
+	if v, err := s.GetMetadata(ctx, "tx-key"); err == nil && v != "" {
+		t.Errorf("metadata tx-key = %q, want unset (metadata not rolled back)", v)
+	}
+	postEvents, err := s.GetEvents(ctx, "test-1", 0)
+	if err != nil {
+		t.Fatalf("GetEvents after rollback: %v", err)
+	}
+	if len(postEvents) != len(preEvents) {
+		t.Errorf("test-1 events = %d, want %d (event appends not rolled back)", len(postEvents), len(preEvents))
+	}
+}
+
+// A successful transaction keeps its writes, and writes outside any
+// transaction are untouched by the journal machinery.
+func TestRunInTransactionSuccessPersists(t *testing.T) {
+	s := newTestStore(t)
+	err := s.RunInTransaction(ctx, "test", func(tx storage.Transaction) error {
+		return tx.CreateIssue(ctx, &types.Issue{ID: "test-1", Title: "kept"}, "t")
+	})
+	if err != nil {
+		t.Fatalf("RunInTransaction: %v", err)
+	}
+	got, err := s.GetIssue(ctx, "test-1")
+	if err != nil {
+		t.Fatalf("GetIssue: %v", err)
+	}
+	if got.Title != "kept" {
+		t.Errorf("title = %q, want %q", got.Title, "kept")
 	}
 }
 

@@ -123,7 +123,7 @@ func (s *FlatFileStore) writeCounter(state *counterState) error {
 	}
 	data = append(data, '\n')
 
-	if err := atomicWriteFile(s.counterPath, data); err != nil {
+	if err := s.atomicWrite(s.counterPath, data); err != nil {
 		return fmt.Errorf("flatfile: write counter: %w", err)
 	}
 	return nil
