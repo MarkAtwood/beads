@@ -84,6 +84,53 @@ func TestInitFlatfileCreatesNoEmbeddedDoltArtifacts(t *testing.T) {
 	}
 }
 
+// TASKS-vs5y: flatfile prefixes become filename components
+// (issues/<prefix>-<n>.json); a prefix with a path separator or space must be
+// rejected up front — before any side effects — instead of producing a
+// workspace where every 'bd create' fails with ENOENT. Auto-detect-shaped
+// prefixes (underscores, uppercase) stay accepted for parity with the Dolt
+// path's database-name rule.
+func TestRunInitFlatfileValidatesPrefix(t *testing.T) {
+	for _, tc := range []struct {
+		prefix  string
+		wantErr bool
+	}{
+		{"a/b", true},
+		{`a\b`, true},
+		{"a b", true},
+		{"-lead", true},
+		{"my_Project", false},
+		{"tasks-2", false},
+	} {
+		t.Run(tc.prefix, func(t *testing.T) {
+			origStore := store
+			t.Cleanup(func() {
+				if store != nil && store != origStore {
+					_ = store.Close()
+				}
+				store = origStore
+			})
+
+			tmpDir := t.TempDir()
+			t.Chdir(tmpDir)
+			beadsDir := filepath.Join(tmpDir, ".beads")
+
+			err := runInitFlatfile(t.Context(), beadsDir, tc.prefix, true, true, true, false)
+			if tc.wantErr {
+				if err == nil {
+					t.Fatalf("runInitFlatfile(prefix=%q) succeeded; want validation error", tc.prefix)
+				}
+				// Validation must fire before side effects: no half-created workspace.
+				if _, statErr := os.Stat(beadsDir); !os.IsNotExist(statErr) {
+					t.Errorf("invalid prefix %q left a partially created %s (stat err=%v)", tc.prefix, beadsDir, statErr)
+				}
+			} else if err != nil {
+				t.Fatalf("runInitFlatfile(prefix=%q) failed: %v", tc.prefix, err)
+			}
+		})
+	}
+}
+
 // TASKS-vqtt: Dolt-only init flags must be rejected on --backend=flatfile,
 // not silently ignored (the user asked for server mode / a named database
 // and would silently get neither).

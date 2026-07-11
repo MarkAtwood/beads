@@ -3038,6 +3038,23 @@ func resolveInitDoltMode(proxiedFlag, sharedFlag, serverFlag bool) string {
 // runInitFlatfile handles "bd init --backend=flatfile" — creates a flat-file
 // beads workspace without any Dolt server or embedded database.
 func runInitFlatfile(ctx context.Context, beadsDir, prefix string, quiet, skipHooks, skipAgents, stealth bool) error {
+	// Determine the issue prefix up front and validate it BEFORE any side
+	// effects so an invalid prefix cannot leave a half-created workspace.
+	// Flat-file issue IDs become filenames (issues/<prefix>-<n>.json), so the
+	// prefix is user input flowing into paths; enforce the same identifier
+	// rule the Dolt path applies to the prefix-derived database name — which
+	// validatePrefix cannot be used for here, because auto-detected prefixes
+	// legitimately contain underscores and uppercase (normalizeIssuePrefix
+	// output) that the Dolt path accepts.
+	issuePrefix := strings.ReplaceAll(prefix, ".", "_")
+	if issuePrefix == "" {
+		issuePrefix = strings.ReplaceAll(filepath.Base(mustCwd()), "-", "_")
+		issuePrefix = strings.ReplaceAll(issuePrefix, ".", "_")
+	}
+	if err := dolt.ValidateDatabaseName(issuePrefix); err != nil {
+		return HandleError("invalid issue prefix %q: prefixes must start with a letter or underscore and contain only letters, digits, underscores, or hyphens (flat-file issue IDs become filenames)", issuePrefix)
+	}
+
 	// Create .beads/ directory.
 	if err := os.MkdirAll(beadsDir, 0o700); err != nil {
 		return HandleError("failed to create .beads directory: %v", err)
@@ -3071,12 +3088,7 @@ func runInitFlatfile(ctx context.Context, beadsDir, prefix string, quiet, skipHo
 		fmt.Fprintf(os.Stderr, "Warning: failed to write .gitignore: %v\n", err)
 	}
 
-	// Set issue prefix.
-	issuePrefix := strings.ReplaceAll(prefix, ".", "_")
-	if issuePrefix == "" {
-		issuePrefix = strings.ReplaceAll(filepath.Base(mustCwd()), "-", "_")
-		issuePrefix = strings.ReplaceAll(issuePrefix, ".", "_")
-	}
+	// Set issue prefix (validated above).
 	if err := ffStore.SetConfig(ctx, "issue_prefix", issuePrefix); err != nil {
 		_ = ffStore.Close()
 		return HandleError("failed to set issue prefix: %v", err)
