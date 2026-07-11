@@ -13,9 +13,10 @@ import (
 
 // This file implements batch issue creation, mirroring
 // issueops.CreateIssuesInTxWithResult. The SQL backends get all-or-nothing
-// semantics from transaction rollback; the flat-file store has no rollback
-// (writes are per-file), so the ENTIRE batch is validated in memory first and
-// files are only written once no batch-aborting error remains.
+// semantics from transaction rollback; the flat-file store validates the
+// ENTIRE batch in memory first and runs the per-file writes under the
+// pre-image journal (journal.go), so a mid-batch I/O failure rolls back to
+// the pre-batch state instead of persisting a partial import.
 
 // plannedIssue is the write-phase plan for one input issue.
 type plannedIssue struct {
@@ -41,6 +42,27 @@ func (s *FlatFileStore) CreateIssuesWithFullOptions(ctx context.Context, issues 
 	if len(issues) == 0 {
 		return nil
 	}
+	// bd import and repo-sync call this directly with no RunInTransaction
+	// wrapper, while the SQL backends are internally tx-wrapped
+	// (CreateIssuesInTxWithResult) and get all-or-nothing semantics from
+	// rollback. Wrap the batch in RunInTransaction so the journal covers
+	// every write and a mid-batch I/O failure (ENOSPC, EIO) restores the
+	// pre-batch state. Inside an active transaction (txOwner match) the
+	// outer journal already covers rollback — re-arming would clobber it,
+	// and re-taking txMu would self-deadlock — so the body runs directly.
+	if s.txOwner.Load() != goroutineID() {
+		return s.RunInTransaction(ctx, "", func(storage.Transaction) error {
+			return s.createIssuesBatch(ctx, issues, actor, opts)
+		})
+	}
+	return s.createIssuesBatch(ctx, issues, actor, opts)
+}
+
+// createIssuesBatch is the batch body. The caller guarantees txMu's write
+// half is held by this goroutine (RunInTransaction above, or an enclosing
+// transaction callback), so lockWrite's txShared half is an owner-match
+// no-op and only writeMu is taken here.
+func (s *FlatFileStore) createIssuesBatch(ctx context.Context, issues []*types.Issue, actor string, opts storage.BatchCreateOptions) error {
 	// The whole plan-then-write batch runs under lockWrite so the validated
 	// in-memory plan cannot be invalidated by a concurrent mutation. No
 	// callee below takes writeMu — comment writes go through
@@ -192,7 +214,10 @@ func (s *FlatFileStore) CreateIssuesWithFullOptions(ctx context.Context, issues 
 		return err
 	}
 
-	// Write phase: validation passed, nothing can abort the batch now.
+	// Write phase: validation passed; the only remaining failures are I/O
+	// errors, and every write below is journal-aware (writeIssue/atomicWrite,
+	// appendEvent, writeCommentFile), so an error here rolls the whole batch
+	// back in the enclosing transaction.
 	for _, plan := range plans {
 		if plan.stale {
 			if opts.OnStaleRejected != nil {
