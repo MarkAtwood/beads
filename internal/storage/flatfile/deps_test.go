@@ -69,6 +69,35 @@ func TestAddDependencyIdempotent(t *testing.T) {
 	}
 }
 
+func TestAddDependencyCrossPrefix(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+
+	s.CreateIssue(ctx, &types.Issue{ID: "rigA-1", Title: "Local"}, "tester")
+
+	// SQL wrappers (dolt isCrossPrefixDep -> AddDependencyOpts.IsCrossPrefix)
+	// treat a target with a different ID prefix as living in another rig:
+	// existence validation is skipped, the edge is recorded as external.
+	dep := &types.Dependency{IssueID: "rigA-1", DependsOnID: "rigB-456", Type: "blocks"}
+	if err := s.AddDependency(ctx, dep, "tester"); err != nil {
+		t.Fatalf("AddDependency cross-prefix: %v", err)
+	}
+
+	issue, err := s.GetIssue(ctx, "rigA-1")
+	if err != nil {
+		t.Fatalf("GetIssue: %v", err)
+	}
+	found := false
+	for _, d := range issue.Dependencies {
+		if d.DependsOnID == "rigB-456" && d.Type == "blocks" {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("cross-prefix dependency rigA-1 -> rigB-456 not persisted: %v", issue.Dependencies)
+	}
+}
+
 func TestRemoveDependency(t *testing.T) {
 	s := newTestStore(t)
 	ctx := context.Background()

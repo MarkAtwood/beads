@@ -131,8 +131,10 @@ func computeBlockedSet(all []*types.Issue) map[string]bool {
 // issue's JSON. Mirrors issueops.AddDependencyInTx: source/target existence,
 // cross-type blocking (GH#1495), self-dependency and cycle rejection,
 // idempotent same-type metadata updates, and type-conflict errors. External
-// ("external:...") targets skip existence validation. The source issue's
-// updated_at is deliberately NOT bumped (SQL never touches it here).
+// ("external:...") and cross-prefix targets (another rig's beads — the SQL
+// wrappers route these as DepTargetExternal via isCrossPrefixDep) skip
+// existence validation and the GH#1495 check. The source issue's updated_at
+// is deliberately NOT bumped (SQL never touches it here).
 func (s *FlatFileStore) AddDependency(_ context.Context, dep *types.Dependency, actor string) error {
 	if err := s.checkClosed(); err != nil {
 		return err
@@ -148,8 +150,10 @@ func (s *FlatFileStore) AddDependency(_ context.Context, dep *types.Dependency, 
 		return err
 	}
 
+	isCrossPrefix := types.ExtractPrefix(dep.IssueID) != types.ExtractPrefix(dep.DependsOnID)
+
 	var target *types.Issue
-	if !isExternalDepTarget(dep.DependsOnID) {
+	if !isCrossPrefix && !isExternalDepTarget(dep.DependsOnID) {
 		target, err = s.readIssue(dep.DependsOnID)
 		if err != nil {
 			if errors.Is(err, storage.ErrNotFound) {
