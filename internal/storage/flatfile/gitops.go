@@ -393,7 +393,6 @@ func (s *FlatFileStore) ListRemotes(ctx context.Context) ([]storage.RemoteInfo, 
 }
 
 func (s *FlatFileStore) Push(ctx context.Context) error {
-	_, _ = s.git(ctx, "add", ".beads/")
 	_, err := s.git(ctx, "push")
 	return err
 }
@@ -404,7 +403,6 @@ func (s *FlatFileStore) Pull(ctx context.Context) error {
 }
 
 func (s *FlatFileStore) ForcePush(ctx context.Context) error {
-	_, _ = s.git(ctx, "add", ".beads/")
 	_, err := s.git(ctx, "push", "--force")
 	return err
 }
@@ -441,7 +439,6 @@ func (s *FlatFileStore) PushTo(ctx context.Context, peer string) error {
 	if err := validateGitArg("peer", peer); err != nil {
 		return err
 	}
-	_, _ = s.git(ctx, "add", ".beads/")
 	_, err := s.git(ctx, "push", peer)
 	return err
 }
