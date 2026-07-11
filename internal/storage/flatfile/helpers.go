@@ -84,7 +84,7 @@ func rejectSymlink(path string) error {
 // fsynced: losing the rename itself just resurfaces the previous consistent
 // version, which is acceptable here and avoids doubling the fsync cost.
 func atomicWriteFile(path string, data []byte) error {
-	f, err := os.CreateTemp(filepath.Dir(path), filepath.Base(path)+".tmp-*")
+	f, err := tempFile(path)
 	if err != nil {
 		return err
 	}
@@ -112,6 +112,17 @@ func atomicWriteFile(path string, data []byte) error {
 		return err
 	}
 	return nil
+}
+
+// tempFile creates the uniquely-named temp file atomicWriteFile renames over
+// path. The "<base>.*.tmp" pattern (os.CreateTemp replaces the last '*') keeps
+// the name unique while still ENDING in ".tmp": a temp orphaned by a crash
+// between creation and rename must stay inside the "*.tmp" rule of the
+// .beads/.gitignore written at init and the ".tmp" suffix guard in
+// loadAllIssues, or the next 'git add .beads/' stages the litter and syncs it
+// to every peer permanently.
+func tempFile(path string) (*os.File, error) {
+	return os.CreateTemp(filepath.Dir(path), filepath.Base(path)+".*.tmp")
 }
 
 // readDirSafe reads a directory, returning nil (not error) if it doesn't exist.
