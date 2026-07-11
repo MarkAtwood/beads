@@ -65,6 +65,20 @@ func (s *FlatFileStore) RunInTransaction(ctx context.Context, commitMsg string, 
 	return s.commitTransaction(ctx, commitMsg)
 }
 
+// runAtomic runs fn as one all-or-nothing, fully serialized mutation: outside
+// a transaction it wraps fn in RunInTransaction (no commit message, so no git
+// side effects) — txMu's write half excludes every concurrent writer and the
+// pre-image journal rolls back a partial multi-file failure, mirroring the
+// SQL backends' withWriteTx. Inside a transaction callback it runs fn
+// directly: nested RunInTransaction self-deadlocks, and the outer journal
+// already covers fn's writes.
+func (s *FlatFileStore) runAtomic(ctx context.Context, fn func() error) error {
+	if s.txOwner.Load() == goroutineID() {
+		return fn()
+	}
+	return s.RunInTransaction(ctx, "", func(storage.Transaction) error { return fn() })
+}
+
 // commitTransaction is the flat-file analog of embeddeddolt's post-commit
 // StageAndCommit: a successful transaction with a commit message creates one
 // git version commit. Without it, cmd/bd's transact() marks the command as

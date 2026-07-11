@@ -16,23 +16,27 @@ import (
 // types.custom are validated and synced to the normalized custom-status/
 // custom-type files first, mirroring the SQL backends' SetConfig →
 // SyncCustomStatusesTable/SyncCustomTypesTable write tx: an invalid value
-// returns an error and nothing is stored.
-func (s *FlatFileStore) SetConfig(_ context.Context, key, value string) error {
+// returns an error and nothing is stored. runAtomic makes the two-file write
+// match that single write tx: concurrent setters serialize (no interleave can
+// leave the config value and the normalized file disagreeing) and a partial
+// failure rolls both files back.
+func (s *FlatFileStore) SetConfig(ctx context.Context, key, value string) error {
 	if err := s.checkClosed(); err != nil {
 		return err
 	}
-	defer s.txShared()()
-	switch key {
-	case "status.custom":
-		if err := s.syncCustomStatuses(value); err != nil {
-			return err
+	return s.runAtomic(ctx, func() error {
+		switch key {
+		case "status.custom":
+			if err := s.syncCustomStatuses(value); err != nil {
+				return err
+			}
+		case "types.custom":
+			if err := s.syncCustomTypes(value); err != nil {
+				return err
+			}
 		}
-	case "types.custom":
-		if err := s.syncCustomTypes(value); err != nil {
-			return err
-		}
-	}
-	return s.setKV(s.configKVPath, key, value)
+		return s.setKV(s.configKVPath, key, value)
+	})
 }
 
 // GetConfig retrieves a value from the config store.
