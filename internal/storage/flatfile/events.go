@@ -193,10 +193,17 @@ func (s *FlatFileStore) GetAllEventsSince(_ context.Context, since time.Time) ([
 	return result, nil
 }
 
-// CountEvents returns the count of events for an issue.
+// CountEvents returns the count of events for an issue. Mirrors the SQL
+// surface's intentional asymmetry (same as CountIssueComments): the count
+// queries only the durable `events` table and is never wisp-routed, so a wisp
+// always reports 0 even though GetEvents returns its events.
 func (s *FlatFileStore) CountEvents(_ context.Context, issueID string, limit int) (int64, error) {
 	if err := s.checkClosed(); err != nil {
 		return 0, err
+	}
+
+	if issue, err := s.readIssue(issueID); err == nil && issueops.IsWisp(issue) {
+		return 0, nil
 	}
 
 	events, err := s.readEventsFile(issueID)
