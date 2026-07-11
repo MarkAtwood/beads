@@ -114,6 +114,56 @@ func TestSafePathRejectsSymlinks(t *testing.T) {
 	}
 }
 
+// TestStoreRootSymlinkRejected covers the ancestor-symlink gap left by the
+// per-write checks exercised in TestSafePathRejectsSymlinks: rejectSymlink
+// Lstats only the FINAL path component and Lstat traverses ancestors, so a
+// hostile repo committing .beads itself as a symlink (the same
+// checkout-materialized threat) passed every safePath check —
+// Lstat(".beads/issues") follows the .beads link and sees a regular dir at
+// the target — and bd create then wrote issue files outside the store.
+// Opening a store whose root is a symlink must fail on every constructor,
+// and the failed open must not create anything at the link target.
+func TestStoreRootSymlinkRejected(t *testing.T) {
+	target := t.TempDir() // attacker-chosen destination outside the checkout
+	link := filepath.Join(t.TempDir(), ".beads")
+	mustSymlink(t, target, link)
+
+	// Valid flatfile metadata at the target so OpenStore gets past metadata
+	// verification and the symlink check is what must reject it.
+	if err := os.WriteFile(filepath.Join(target, "metadata.json"), []byte(`{"backend":"flatfile"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	ctx := context.Background()
+	if _, err := NewFlatFileStore(link); err == nil {
+		t.Error("NewFlatFileStore opened a symlinked store root")
+	}
+	if _, err := newFlatFileStoreNoCreate(link); err == nil {
+		t.Error("newFlatFileStoreNoCreate opened a symlinked store root")
+	}
+	if _, err := OpenStore(ctx, link); err == nil {
+		t.Error("OpenStore opened a symlinked store root")
+	}
+	if _, err := OpenStoreReadOnly(ctx, link); err == nil {
+		t.Error("OpenStoreReadOnly opened a symlinked store root")
+	}
+
+	// Nothing may have been created through the link: only the metadata.json
+	// planted above exists at the target.
+	entries, err := os.ReadDir(target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 1 || entries[0].Name() != "metadata.json" {
+		t.Errorf("open created %d entrie(s) at the symlink target", len(entries)-1)
+	}
+
+	// A regular (non-symlink) store root still opens.
+	if _, err := NewFlatFileStore(filepath.Join(t.TempDir(), ".beads")); err != nil {
+		t.Errorf("NewFlatFileStore rejected a regular store root: %v", err)
+	}
+}
+
 func TestSymlinkEscapeBlockedOnWrite(t *testing.T) {
 	s := newTestStore(t)
 	ctx := context.Background()
