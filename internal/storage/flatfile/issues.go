@@ -71,8 +71,10 @@ func (s *FlatFileStore) readIssue(id string) (*types.Issue, error) {
 	issue, err := decodeIssue(data)
 	if err != nil {
 		// Attempt to repair non-RFC3339 timestamps (e.g. MySQL datetime
-		// "2026-06-22 14:31:53" instead of "2026-06-22T14:31:53Z").
-		if repaired := repairMySQLTimestamps(data); repaired != nil {
+		// "2026-06-22 14:31:53" instead of "2026-06-22T14:31:53Z"),
+		// anchored to known timestamp fields so user content that merely
+		// looks like a datetime is never rewritten.
+		if repaired := repairIssueTimestamps(data); repaired != nil {
 			if fixed, err2 := decodeIssue(repaired); err2 == nil {
 				return fixed, nil
 			}
@@ -94,12 +96,86 @@ func (s *FlatFileStore) readIssue(id string) (*types.Issue, error) {
 var mysqlDatetimeRe = regexp.MustCompile(`"(\d{4}-\d{2}-\d{2}) (\d{2}:\d{2}:\d{2})"`)
 
 // repairMySQLTimestamps rewrites MySQL datetime strings to RFC3339 in raw JSON.
-// Returns nil if no replacements were made.
+// Returns nil if no replacements were made. It rewrites ANY matching value, so
+// callers repairing whole documents must scope it to known timestamp fields
+// (see repairIssueTimestamps) or user content gets mangled.
 func repairMySQLTimestamps(data []byte) []byte {
 	if !mysqlDatetimeRe.Match(data) {
 		return nil
 	}
 	return mysqlDatetimeRe.ReplaceAll(data, []byte(`"${1}T${2}Z"`))
+}
+
+// issueTimestampKeys are the issue-file JSON fields (top level and inside
+// embedded comments/dependencies) that hold time values.
+var issueTimestampKeys = []string{
+	"created_at", "updated_at", "closed_at", "started_at", "due_at",
+	"defer_until", "lease_expires_at", "heartbeat_at", "compacted_at",
+}
+
+// repairIssueTimestamps applies repairMySQLTimestamps to known timestamp
+// fields only — top level plus embedded comments/dependencies — so a title,
+// description, or metadata value that happens to be a datetime string is
+// preserved verbatim. Returns nil if nothing changed.
+func repairIssueTimestamps(data []byte) []byte {
+	var raw map[string]json.RawMessage
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return nil
+	}
+
+	changed := repairTimestampFields(raw)
+
+	for _, listKey := range []string{"comments", "dependencies"} {
+		rawList, ok := raw[listKey]
+		if !ok {
+			continue
+		}
+		var list []map[string]json.RawMessage
+		if err := json.Unmarshal(rawList, &list); err != nil {
+			continue
+		}
+		listChanged := false
+		for _, item := range list {
+			if repairTimestampFields(item) {
+				listChanged = true
+			}
+		}
+		if !listChanged {
+			continue
+		}
+		encoded, err := json.Marshal(list)
+		if err != nil {
+			continue
+		}
+		raw[listKey] = encoded
+		changed = true
+	}
+
+	if !changed {
+		return nil
+	}
+	repaired, err := json.Marshal(raw)
+	if err != nil {
+		return nil
+	}
+	return repaired
+}
+
+// repairTimestampFields rewrites MySQL datetimes in the known timestamp keys
+// of one decoded JSON object, reporting whether anything changed.
+func repairTimestampFields(m map[string]json.RawMessage) bool {
+	changed := false
+	for _, key := range issueTimestampKeys {
+		v, ok := m[key]
+		if !ok {
+			continue
+		}
+		if fixed := repairMySQLTimestamps(v); fixed != nil {
+			m[key] = fixed
+			changed = true
+		}
+	}
+	return changed
 }
 
 // repairIssueTypes fixes type mismatches from raw Dolt SQL exports:

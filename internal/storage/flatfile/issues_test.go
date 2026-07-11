@@ -838,3 +838,47 @@ func TestCreateIssueValidates(t *testing.T) {
 		t.Errorf("batch member written despite failed batch: err = %v, want ErrNotFound", err)
 	}
 }
+
+func TestRepairIssueTimestampsPreservesUserContent(t *testing.T) {
+	s := newTestStore(t)
+
+	// A Dolt/MySQL export with a broken created_at AND user content that is
+	// exactly a datetime string. The repair must fix only the timestamp
+	// fields; title/description/metadata are user data and stay verbatim.
+	const datetime = "2026-06-22 14:31:53"
+	raw := `{
+  "id": "repair-1",
+  "title": "` + datetime + `",
+  "description": "deployed at ` + datetime + ` UTC",
+  "status": "open",
+  "metadata": {"note": "` + datetime + `"},
+  "created_at": "` + datetime + `",
+  "updated_at": "` + datetime + `",
+  "comments": [{"id": "c1", "issue_id": "repair-1", "author": "a", "text": "x", "created_at": "` + datetime + `"}]
+}
+`
+	if err := os.WriteFile(s.issueFilename("repair-1"), []byte(raw), 0o644); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+
+	got, err := s.GetIssue(ctx, "repair-1")
+	if err != nil {
+		t.Fatalf("GetIssue: %v", err)
+	}
+	want := time.Date(2026, 6, 22, 14, 31, 53, 0, time.UTC)
+	if !got.CreatedAt.Equal(want) {
+		t.Errorf("CreatedAt = %v, want %v (repaired)", got.CreatedAt, want)
+	}
+	if got.Title != datetime {
+		t.Errorf("Title = %q, want %q (user content must not be rewritten)", got.Title, datetime)
+	}
+	if !strings.Contains(got.Description, datetime) {
+		t.Errorf("Description = %q, want embedded %q preserved", got.Description, datetime)
+	}
+	if !strings.Contains(string(got.Metadata), datetime) {
+		t.Errorf("Metadata = %q, want %q preserved", got.Metadata, datetime)
+	}
+	if len(got.Comments) != 1 || !got.Comments[0].CreatedAt.Equal(want) {
+		t.Errorf("embedded comment created_at not repaired: %+v", got.Comments)
+	}
+}
