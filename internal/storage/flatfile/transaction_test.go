@@ -2,6 +2,9 @@ package flatfile
 
 import (
 	"errors"
+	"os/exec"
+	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/steveyegge/beads/internal/storage"
@@ -115,6 +118,62 @@ func TestRunInTransactionSuccessPersists(t *testing.T) {
 	}
 	if got.Title != "kept" {
 		t.Errorf("title = %q, want %q", got.Title, "kept")
+	}
+}
+
+// A successful transaction with a commit message must create a git version
+// commit (the flat-file analog of embeddeddolt's StageAndCommit): cmd/bd's
+// transact() marks the command as explicitly committed, so nothing else will
+// commit the writes. An empty message creates no commit.
+func TestRunInTransactionCommitsWithMessage(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not installed")
+	}
+	dir := t.TempDir()
+	git := func(args ...string) string {
+		t.Helper()
+		cmd := exec.Command("git", args...)
+		cmd.Dir = dir
+		out, err := cmd.CombinedOutput()
+		if err != nil {
+			t.Fatalf("git %v: %v\n%s", args, err, out)
+		}
+		return strings.TrimSpace(string(out))
+	}
+	git("init", "-q")
+	git("config", "user.email", "bd-test@example.com")
+	git("config", "user.name", "bd test")
+	git("config", "commit.gpgsign", "false")
+
+	s, err := NewFlatFileStore(filepath.Join(dir, ".beads"))
+	if err != nil {
+		t.Fatalf("NewFlatFileStore: %v", err)
+	}
+	t.Cleanup(func() { s.Close() })
+
+	const msg = "bd: tx commit test"
+	err = s.RunInTransaction(ctx, msg, func(tx storage.Transaction) error {
+		return tx.CreateIssue(ctx, &types.Issue{ID: "test-1", Title: "in tx"}, "t")
+	})
+	if err != nil {
+		t.Fatalf("RunInTransaction: %v", err)
+	}
+	if got := git("log", "-1", "--format=%s"); got != msg {
+		t.Errorf("last commit subject = %q, want %q", got, msg)
+	}
+	if status := git("status", "--porcelain", ".beads/"); status != "" {
+		t.Errorf(".beads/ not clean after transactional commit:\n%s", status)
+	}
+
+	before := git("rev-parse", "HEAD")
+	err = s.RunInTransaction(ctx, "", func(tx storage.Transaction) error {
+		return tx.CreateIssue(ctx, &types.Issue{ID: "test-2", Title: "no msg"}, "t")
+	})
+	if err != nil {
+		t.Fatalf("RunInTransaction(no msg): %v", err)
+	}
+	if after := git("rev-parse", "HEAD"); after != before {
+		t.Errorf("empty commitMsg created a commit: %s -> %s", before, after)
 	}
 }
 

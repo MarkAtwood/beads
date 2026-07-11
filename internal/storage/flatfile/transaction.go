@@ -25,7 +25,7 @@ var _ storage.Transaction = (*flatFileTx)(nil)
 // sqlkit) restores them all. Known gap: UpdateIssueID's best-effort
 // comment-dir/event-file renames are directory moves outside the file
 // journal and are not undone.
-func (s *FlatFileStore) RunInTransaction(ctx context.Context, _ string, fn func(tx storage.Transaction) error) error {
+func (s *FlatFileStore) RunInTransaction(ctx context.Context, commitMsg string, fn func(tx storage.Transaction) error) error {
 	if err := s.checkClosed(); err != nil {
 		return err
 	}
@@ -54,7 +54,32 @@ func (s *FlatFileStore) RunInTransaction(ctx context.Context, _ string, fn func(
 		}
 		return err
 	}
-	return nil
+	return s.commitTransaction(ctx, commitMsg)
+}
+
+// commitTransaction is the flat-file analog of embeddeddolt's post-commit
+// StageAndCommit: a successful transaction with a commit message creates one
+// git version commit. Without it, cmd/bd's transact() marks the command as
+// explicitly committed and PersistentPostRun skips maybeAutoCommit, leaving
+// transactional writes uncommitted in the working tree. Mirroring
+// embeddeddolt's dirty-table guard, an unchanged tree is a no-op; a store
+// outside any git work tree (conformance temp dirs) has no version layer to
+// commit to, matching sqlkit's unversioned handling of commitMsg.
+func (s *FlatFileStore) commitTransaction(ctx context.Context, commitMsg string) error {
+	if commitMsg == "" {
+		return nil
+	}
+	if _, err := s.git(ctx, "rev-parse", "--is-inside-work-tree"); err != nil {
+		return nil
+	}
+	out, err := s.git(ctx, "status", "--porcelain", ".beads/")
+	if err != nil {
+		return err
+	}
+	if out == "" {
+		return nil
+	}
+	return s.Commit(ctx, commitMsg)
 }
 
 // AddDependencyWithOptions ignores the transaction-scoped options: flat-file
