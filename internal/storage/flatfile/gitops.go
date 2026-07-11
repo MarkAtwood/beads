@@ -24,6 +24,15 @@ func (s *FlatFileStore) gitDir() string {
 	return filepath.Dir(s.beadsDir)
 }
 
+// beadsPathspec returns the store directory's git pathspec relative to
+// gitDir (its parent). The basename is not always ".beads" — BEADS_DIR may
+// point anywhere — and git treats a non-matching pathspec as "no files":
+// status reports clean and add/commit silently touch nothing, so the version
+// commit is skipped without error.
+func (s *FlatFileStore) beadsPathspec() string {
+	return filepath.Base(s.beadsDir) + "/"
+}
+
 // git runs a git command in the repo root and returns stdout.
 func (s *FlatFileStore) git(ctx context.Context, args ...string) (string, error) {
 	cmd := exec.CommandContext(ctx, "git", args...)
@@ -106,8 +115,8 @@ func (s *FlatFileStore) ListBranches(ctx context.Context) ([]string, error) {
 }
 
 func (s *FlatFileStore) Commit(ctx context.Context, message string) error {
-	_, _ = s.git(ctx, "add", ".beads/")
-	_, err := s.git(ctx, "commit", "-m", message, "--", ".beads/")
+	_, _ = s.git(ctx, "add", s.beadsPathspec())
+	_, err := s.git(ctx, "commit", "-m", message, "--", s.beadsPathspec())
 	return err
 }
 
