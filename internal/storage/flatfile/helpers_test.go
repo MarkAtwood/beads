@@ -28,6 +28,8 @@ func TestValidateID(t *testing.T) {
 
 	invalid := []string{
 		"",
+		".",
+		"..",
 		"../etc/passwd",
 		"foo/bar",
 		"foo\\bar",
