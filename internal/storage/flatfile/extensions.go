@@ -185,7 +185,7 @@ func (s *FlatFileStore) writeMergeSlot(state *mergeSlotState) error {
 
 // ── Metadata Slots ────────────────────────────────────────────────────
 
-func (s *FlatFileStore) SlotSet(_ context.Context, issueID, key, value, _ string) error {
+func (s *FlatFileStore) SlotSet(_ context.Context, issueID, key, value, actor string) error {
 	if err := s.checkClosed(); err != nil {
 		return err
 	}
@@ -206,9 +206,23 @@ func (s *FlatFileStore) SlotSet(_ context.Context, issueID, key, value, _ string
 	if err != nil {
 		return fmt.Errorf("flatfile: marshal issue metadata: %w", err)
 	}
+	oldData, _ := json.Marshal(issue)
 	issue.Metadata = raw
 	issue.UpdatedAt = time.Now().UTC()
-	return s.writeIssue(issue)
+	if err := s.writeIssue(issue); err != nil {
+		return err
+	}
+	// sqlkit routes SlotSet through UpdateIssue, which records an event;
+	// mirror its payloads (old issue snapshot, {"metadata": <json>} updates).
+	return s.recordMetadataEvent(issueID, actor, oldData, raw)
+}
+
+// recordMetadataEvent records the event UpdateIssue would have minted for a
+// metadata-only update, matching the sqlkit slot paths that inherit it.
+func (s *FlatFileStore) recordMetadataEvent(issueID, actor string, oldData, rawMeta []byte) error {
+	updates := map[string]interface{}{"metadata": string(rawMeta)}
+	newData, _ := json.Marshal(updates)
+	return s.recordEvent(issueID, types.EventUpdated, actor, string(oldData), string(newData))
 }
 
 func (s *FlatFileStore) SlotGet(_ context.Context, issueID, key string) (string, error) {
@@ -242,7 +256,7 @@ func (s *FlatFileStore) SlotGet(_ context.Context, issueID, key string) (string,
 	return string(raw), nil
 }
 
-func (s *FlatFileStore) SlotClear(_ context.Context, issueID, key, _ string) error {
+func (s *FlatFileStore) SlotClear(_ context.Context, issueID, key, actor string) error {
 	if err := s.checkClosed(); err != nil {
 		return err
 	}
@@ -269,9 +283,14 @@ func (s *FlatFileStore) SlotClear(_ context.Context, issueID, key, _ string) err
 	if err != nil {
 		return fmt.Errorf("flatfile: marshal issue metadata: %w", err)
 	}
+	oldData, _ := json.Marshal(issue)
 	issue.Metadata = raw
 	issue.UpdatedAt = time.Now().UTC()
-	return s.writeIssue(issue)
+	if err := s.writeIssue(issue); err != nil {
+		return err
+	}
+	// sqlkit routes SlotClear through UpdateIssue, which records an event.
+	return s.recordMetadataEvent(issueID, actor, oldData, raw)
 }
 
 // ── BulkIssueStore ───────────────────────────────────────────────────
@@ -711,6 +730,7 @@ func (s *FlatFileStore) ClaimIssue(ctx context.Context, id string, actor string)
 		return fmt.Errorf("issue already assigned to %q. Use `bd unclaim %s` to release it before re-claiming", issue.Assignee, id)
 	}
 
+	oldData, _ := json.Marshal(issue)
 	now := time.Now().UTC()
 	issue.Assignee = actor
 	issue.Status = types.StatusInProgress
@@ -721,7 +741,15 @@ func (s *FlatFileStore) ClaimIssue(ctx context.Context, id string, actor string)
 	expires := now.Add(issueops.LeaseTTL(ctx))
 	issue.LeaseExpiresAt = &expires
 	issue.HeartbeatAt = &now
-	return s.writeIssue(issue)
+	if err := s.writeIssue(issue); err != nil {
+		return err
+	}
+	// Mirror issueops.ClaimIssueInTx's RecordFullEventInTable payloads.
+	newData, _ := json.Marshal(map[string]interface{}{
+		"assignee": actor,
+		"status":   "in_progress",
+	})
+	return s.recordEvent(id, types.EventType("claimed"), actor, string(oldData), string(newData))
 }
 
 // ClaimReadyIssue claims the first ready issue matching filter. Mirrors
@@ -763,7 +791,7 @@ func (s *FlatFileStore) ClaimReadyIssue(ctx context.Context, filter types.WorkFi
 // UnclaimIssue releases a claim: clears the assignee and returns the issue to
 // open. Mirrors issueops.UnclaimIssueInTx: a closed issue cannot be unclaimed,
 // and an unassigned issue is an error.
-func (s *FlatFileStore) UnclaimIssue(_ context.Context, id string, _ string) error {
+func (s *FlatFileStore) UnclaimIssue(_ context.Context, id string, actor string) error {
 	if err := s.checkClosed(); err != nil {
 		return err
 	}
@@ -779,10 +807,19 @@ func (s *FlatFileStore) UnclaimIssue(_ context.Context, id string, _ string) err
 	if issue.Assignee == "" {
 		return fmt.Errorf("issue %s is not assigned", id)
 	}
+	oldData, _ := json.Marshal(issue)
 	issue.Assignee = ""
 	issue.Status = types.StatusOpen
 	issue.UpdatedAt = time.Now().UTC()
-	return s.writeIssue(issue)
+	if err := s.writeIssue(issue); err != nil {
+		return err
+	}
+	// Mirror issueops.UnclaimIssueInTx's RecordFullEventInTable payloads.
+	newData, _ := json.Marshal(map[string]interface{}{
+		"assignee": "",
+		"status":   "open",
+	})
+	return s.recordEvent(id, types.EventType("unclaimed"), actor, string(oldData), string(newData))
 }
 
 // HeartbeatIssue refreshes the lease on an in_progress issue held by actor,
