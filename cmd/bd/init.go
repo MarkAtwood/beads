@@ -3104,8 +3104,12 @@ func runInitFlatfile(ctx context.Context, beadsDir, prefix string, quiet, skipHo
 		fmt.Printf("✓ Initialized flat-file beads with prefix %q\n", issuePrefix)
 	}
 
-	// Warn if .beads/issues/ would be gitignored.
-	if warning := flatfile.CheckGitignored(beadsDir); warning != "" {
+	// Warn if there is no git repo (flat-file sync happens through git —
+	// without one, issues exist only on this machine) or if .beads/issues/
+	// would be gitignored.
+	if !flatfile.InGitRepo(beadsDir) {
+		fmt.Fprintf(os.Stderr, "\nWARNING: not inside a git repository — flat-file issues exist only on this machine.\nThe flat-file backend syncs through git (push/pull). Run 'git init' to enable sync.\n\n")
+	} else if warning := flatfile.CheckGitignored(beadsDir); warning != "" {
 		fmt.Fprintf(os.Stderr, "\n%s\n\n", warning)
 	}
 
