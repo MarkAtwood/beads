@@ -22,9 +22,6 @@ func (s *FlatFileStore) GetStatistics(_ context.Context) (*types.Statistics, err
 
 	stats := &types.Statistics{}
 
-	var totalLead float64
-	var closedWithLead int
-
 	for _, issue := range all {
 		stats.TotalIssues++
 
@@ -35,11 +32,6 @@ func (s *FlatFileStore) GetStatistics(_ context.Context) (*types.Statistics, err
 			stats.InProgressIssues++
 		case types.StatusClosed:
 			stats.ClosedIssues++
-			if issue.ClosedAt != nil && !issue.CreatedAt.IsZero() {
-				lead := issue.ClosedAt.Sub(issue.CreatedAt).Hours()
-				totalLead += lead
-				closedWithLead++
-			}
 		case types.StatusDeferred:
 			stats.DeferredIssues++
 		case types.StatusBlocked, types.StatusPinned, types.StatusHooked:
@@ -61,38 +53,10 @@ func (s *FlatFileStore) GetStatistics(_ context.Context) (*types.Statistics, err
 		stats.ReadyIssues = 0
 	}
 
-	// Count epics eligible for closure
-	children := make(map[string][]*types.Issue)
-	for _, issue := range all {
-		for _, dep := range issue.Dependencies {
-			if dep.Type == types.DepParentChild {
-				children[dep.DependsOnID] = append(children[dep.DependsOnID], issue)
-			}
-		}
-	}
-	for _, issue := range all {
-		if issue.IssueType != types.TypeEpic || issue.Status == types.StatusClosed {
-			continue
-		}
-		kids := children[issue.ID]
-		if len(kids) == 0 {
-			continue
-		}
-		allClosed := true
-		for _, k := range kids {
-			if k.Status != types.StatusClosed {
-				allClosed = false
-				break
-			}
-		}
-		if allClosed {
-			stats.EpicsEligibleForClosure++
-		}
-	}
-
-	if closedWithLead > 0 {
-		stats.AverageLeadTime = totalLead / float64(closedWithLead)
-	}
+	// AverageLeadTime and EpicsEligibleForClosure stay zero: no SQL backend
+	// fills them (issueops.GetStatisticsInTx computes only counts + blocked +
+	// ready), and bd status gates those lines on > 0, so filling them here
+	// would diverge cross-backend output for identical data.
 
 	return stats, nil
 }
