@@ -313,3 +313,37 @@ func TestInitFlatfileReinitDestroyToken(t *testing.T) {
 		t.Fatalf("reinit with matching --destroy-token failed: %v\n%s", err, out)
 	}
 }
+
+// TASKS-luzu: explicit Dolt server intent with the backend left to default
+// must refuse — `bd init --server` (or --database, --shared-server, …)
+// used to validate the flag, then silently produce a flat-file workspace
+// with the server intent discarded and a stray .beads/dolt/ marker behind.
+func TestInitDefaultBackendRejectsDoltServerFlags(t *testing.T) {
+	cases := []struct {
+		flag string
+		args []string
+	}{
+		{"server", []string{"--server"}},
+		{"shared-server", []string{"--shared-server"}},
+		{"database", []string{"--database", "beadsdb"}},
+		{"server-port", []string{"--server-port", "13307"}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.flag, func(t *testing.T) {
+			resetInitFlags(t, "backend", "prefix", "quiet", "skip-hooks", "skip-agents", tc.flag)
+			beadsDir, err := runInitCommand(t, append([]string{"--prefix", "tst", "--quiet", "--skip-hooks", "--skip-agents"}, tc.args...)...)
+			if err == nil {
+				t.Fatalf("bd init %s with defaulted backend succeeded; want refusal", strings.Join(tc.args, " "))
+			}
+			if !strings.Contains(err.Error(), "--backend=dolt") {
+				t.Errorf("refusal does not point at --backend=dolt: %v", err)
+			}
+			if !strings.Contains(err.Error(), "--"+tc.flag) {
+				t.Errorf("refusal does not name the offending flag --%s: %v", tc.flag, err)
+			}
+			if _, statErr := os.Stat(beadsDir); !os.IsNotExist(statErr) {
+				t.Errorf(".beads was created despite the refusal (stat err: %v)", statErr)
+			}
+		})
+	}
+}
