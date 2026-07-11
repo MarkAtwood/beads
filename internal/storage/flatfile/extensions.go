@@ -204,27 +204,229 @@ func (s *FlatFileStore) SlotClear(_ context.Context, issueID, key, _ string) err
 
 // ── BulkIssueStore ───────────────────────────────────────────────────
 
-func (s *FlatFileStore) DeleteIssues(ctx context.Context, ids []string, _ bool, _ bool, dryRun bool) (*types.DeleteIssuesResult, error) {
+// DeleteIssues mirrors issueops.DeleteIssuesInTx: wisp/durable partitioning,
+// cascade expansion over inbound edges, the orphan guard (non-cascade,
+// non-force errors and deletes nothing when an external dependent exists),
+// force-orphan reporting, dry-run child-row counts, and FK-cascade cleanup
+// of dependency edges referencing the deleted issues.
+func (s *FlatFileStore) DeleteIssues(_ context.Context, ids []string, cascade bool, force bool, dryRun bool) (*types.DeleteIssuesResult, error) {
 	if err := s.checkClosed(); err != nil {
 		return nil, err
 	}
-	result := &types.DeleteIssuesResult{}
+	if len(ids) == 0 {
+		return &types.DeleteIssuesResult{}, nil
+	}
+
+	all, err := s.loadAllIssues()
+	if err != nil {
+		return nil, err
+	}
+	byID := make(map[string]*types.Issue, len(all))
+	dependents := make(map[string][]string) // target id -> inbound source ids
+	for _, issue := range all {
+		byID[issue.ID] = issue
+		for _, dep := range issue.Dependencies {
+			dependents[dep.DependsOnID] = append(dependents[dep.DependsOnID], issue.ID)
+		}
+	}
+	isStoredWisp := func(id string) bool {
+		issue, ok := byID[id]
+		return ok && issueops.IsWisp(issue)
+	}
+
+	// Partition input ids: active wisps bypass the cascade/guard machinery,
+	// exactly like PartitionWispIDsInTx; missing ids stay "regular".
+	var initialWispIDs, regularIDs []string
 	for _, id := range ids {
-		if dryRun {
-			result.DeletedCount++
+		if isStoredWisp(id) {
+			initialWispIDs = append(initialWispIDs, id)
+		} else {
+			regularIDs = append(regularIDs, id)
+		}
+	}
+	idSet := make(map[string]bool, len(ids))
+	for _, id := range ids {
+		idSet[id] = true
+	}
+
+	result := &types.DeleteIssuesResult{}
+
+	expandedRegularIDs := regularIDs
+	switch {
+	case cascade:
+		// BFS over inbound edges: delete the whole dependent subtree.
+		closure := make(map[string]bool, len(regularIDs))
+		queue := append([]string(nil), regularIDs...)
+		for _, id := range regularIDs {
+			closure[id] = true
+		}
+		for len(queue) > 0 {
+			id := queue[0]
+			queue = queue[1:]
+			for _, src := range dependents[id] {
+				if !closure[src] {
+					closure[src] = true
+					queue = append(queue, src)
+				}
+			}
+		}
+		expandedRegularIDs = make([]string, 0, len(closure))
+		for id := range closure {
+			expandedRegularIDs = append(expandedRegularIDs, id)
+		}
+		sort.Strings(expandedRegularIDs)
+	case !force:
+		// Orphan guard: any dependent outside the deletion set aborts the
+		// whole batch before anything is deleted.
+		for _, id := range regularIDs {
+			var external []string
+			for _, src := range dependents[id] {
+				if !idSet[src] {
+					external = append(external, src)
+				}
+			}
+			if len(external) > 0 {
+				result.OrphanedIssues = external
+				return result, fmt.Errorf("issue %s has dependents not in deletion set; use --cascade to delete them or --force to orphan them", id)
+			}
+		}
+	default: // force: delete anyway, report the orphaned dependents
+		orphanSet := make(map[string]bool)
+		for _, id := range regularIDs {
+			for _, src := range dependents[id] {
+				if !idSet[src] {
+					orphanSet[src] = true
+				}
+			}
+		}
+		orphans := make([]string, 0, len(orphanSet))
+		for id := range orphanSet {
+			orphans = append(orphans, id)
+		}
+		sort.Strings(orphans)
+		result.OrphanedIssues = orphans
+	}
+
+	// Cascade can pull wisp dependents into the set; re-partition.
+	var cascadeWispIDs, finalRegularIDs []string
+	for _, id := range expandedRegularIDs {
+		if isStoredWisp(id) {
+			cascadeWispIDs = append(cascadeWispIDs, id)
+		} else {
+			finalRegularIDs = append(finalRegularIDs, id)
+		}
+	}
+	allWispIDs := append(append([]string(nil), initialWispIDs...), cascadeWispIDs...)
+	allDeletedSet := make(map[string]bool, len(finalRegularIDs)+len(allWispIDs))
+	for _, id := range finalRegularIDs {
+		allDeletedSet[id] = true
+	}
+	for _, id := range allWispIDs {
+		allDeletedSet[id] = true
+	}
+
+	// Child-row counts, mirroring the reference exactly: labels, outbound
+	// dependencies, and events of the expanded regular set (initial wisp ids
+	// are NOT counted), plus inbound edges from surviving issues.
+	for _, id := range expandedRegularIDs {
+		issue, ok := byID[id]
+		if !ok {
 			continue
 		}
-		if err := s.DeleteIssue(ctx, id); err != nil {
-			if errors.Is(err, storage.ErrNotFound) {
-				continue
-			}
-			return result, err
+		result.LabelsCount += len(issue.Labels)
+		result.DependenciesCount += len(issue.Dependencies)
+		events, err := s.readEventsFile(id)
+		if err != nil {
+			return nil, err
 		}
-		result.DeletedCount++
+		result.EventsCount += len(events)
+	}
+	for _, id := range expandedRegularIDs {
+		for _, src := range dependents[id] {
+			if !allDeletedSet[src] {
+				result.DependenciesCount++
+			}
+		}
+	}
+	result.DeletedCount = len(finalRegularIDs) + len(allWispIDs)
+
+	if dryRun {
+		return result, nil
+	}
+
+	deleted := make(map[string]bool, len(allDeletedSet))
+	actualRegular := 0
+	for _, id := range finalRegularIDs {
+		if err := s.removeIssueFile(id); err != nil {
+			if errors.Is(err, storage.ErrNotFound) {
+				continue // DELETE ... IN (...) ignores missing rows
+			}
+			return nil, err
+		}
+		actualRegular++
+		deleted[id] = true
+	}
+	for _, id := range allWispIDs {
+		if err := s.removeIssueFile(id); err != nil && !errors.Is(err, storage.ErrNotFound) {
+			return nil, err
+		}
+		deleted[id] = true
+	}
+	result.DeletedCount = actualRegular + len(allWispIDs)
+
+	if err := s.removeDanglingEdges(all, deleted); err != nil {
+		return nil, err
 	}
 	return result, nil
 }
 
+// removeIssueFile deletes an issue's JSON file, mapping a missing file to
+// storage.ErrNotFound.
+func (s *FlatFileStore) removeIssueFile(id string) error {
+	path, err := s.safeIssueFilename(id)
+	if err != nil {
+		return err
+	}
+	if err := os.Remove(path); err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			return storage.ErrNotFound
+		}
+		return fmt.Errorf("flatfile: delete issue %s: %w", id, err)
+	}
+	return nil
+}
+
+// removeDanglingEdges mirrors the dependencies FK ON DELETE CASCADE: edges
+// whose target was deleted are dropped from every surviving issue's JSON.
+// updated_at is deliberately untouched (the SQL cascade never bumps it).
+func (s *FlatFileStore) removeDanglingEdges(all []*types.Issue, deleted map[string]bool) error {
+	for _, issue := range all {
+		if deleted[issue.ID] {
+			continue
+		}
+		kept := issue.Dependencies[:0]
+		changed := false
+		for _, dep := range issue.Dependencies {
+			if deleted[dep.DependsOnID] {
+				changed = true
+				continue
+			}
+			kept = append(kept, dep)
+		}
+		if changed {
+			issue.Dependencies = kept
+			if err := s.writeIssue(issue); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+// DeleteIssuesBySourceRepo mirrors issueops.DeleteIssuesBySourceRepoInTx:
+// only durable issues match (wisps are never touched), child rows cascade
+// with the issue file, and dependency edges referencing the deleted issues
+// are dropped from survivors (FK ON DELETE CASCADE parity).
 func (s *FlatFileStore) DeleteIssuesBySourceRepo(_ context.Context, sourceRepo string) (int, error) {
 	if err := s.checkClosed(); err != nil {
 		return 0, err
@@ -233,18 +435,26 @@ func (s *FlatFileStore) DeleteIssuesBySourceRepo(_ context.Context, sourceRepo s
 	if err != nil {
 		return 0, err
 	}
-	deleted := 0
-	var lastErr error
+	deleted := make(map[string]bool)
 	for _, issue := range all {
-		if issue.SourceRepo == sourceRepo {
-			if err := os.Remove(s.issueFilename(issue.ID)); err != nil && !errors.Is(err, fs.ErrNotExist) {
-				lastErr = err
+		if issueops.IsWisp(issue) || issue.SourceRepo != sourceRepo {
+			continue
+		}
+		if err := s.removeIssueFile(issue.ID); err != nil {
+			if errors.Is(err, storage.ErrNotFound) {
 				continue
 			}
-			deleted++
+			return len(deleted), err
 		}
+		deleted[issue.ID] = true
 	}
-	return deleted, lastErr
+	if len(deleted) == 0 {
+		return 0, nil
+	}
+	if err := s.removeDanglingEdges(all, deleted); err != nil {
+		return len(deleted), err
+	}
+	return len(deleted), nil
 }
 
 // UpdateIssueID renames an issue. Mirrors issueops.updateIssueIDInTx: only

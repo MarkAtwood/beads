@@ -63,26 +63,26 @@ func (s *FlatFileStore) readIssue(id string) (*types.Issue, error) {
 		return nil, fmt.Errorf("flatfile: read issue %s: %w", id, err)
 	}
 
-	var issue types.Issue
-	if err := json.Unmarshal(data, &issue); err != nil {
+	issue, err := decodeIssue(data)
+	if err != nil {
 		// Attempt to repair non-RFC3339 timestamps (e.g. MySQL datetime
 		// "2026-06-22 14:31:53" instead of "2026-06-22T14:31:53Z").
 		if repaired := repairMySQLTimestamps(data); repaired != nil {
-			if err2 := json.Unmarshal(repaired, &issue); err2 == nil {
-				return &issue, nil
+			if fixed, err2 := decodeIssue(repaired); err2 == nil {
+				return fixed, nil
 			}
 		}
 		// Attempt to repair type mismatches from raw SQL exports: integer
 		// booleans (Dolt TINYINT 0/1), object dependency metadata (should
 		// be string), and unknown column names (timeout_ns, content_hash).
 		if repaired := repairIssueTypes(data); repaired != nil {
-			if err2 := json.Unmarshal(repaired, &issue); err2 == nil {
-				return &issue, nil
+			if fixed, err2 := decodeIssue(repaired); err2 == nil {
+				return fixed, nil
 			}
 		}
 		return nil, fmt.Errorf("flatfile: unmarshal issue %s: %w", id, err)
 	}
-	return &issue, nil
+	return issue, nil
 }
 
 // mysqlDatetimeRe matches MySQL datetime strings inside JSON values.
@@ -165,6 +165,26 @@ func repairIssueTypes(data []byte) []byte {
 	return repaired
 }
 
+// issueFile is the on-disk JSON shape of an issue. It persists source_repo,
+// which types.Issue excludes from JSON (json:"-") because SQL backends store
+// it as a table column.
+type issueFile struct {
+	types.Issue
+	FileSourceRepo string `json:"source_repo,omitempty"`
+}
+
+// decodeIssue unmarshals on-disk issue JSON, hoisting source_repo back onto
+// the json:"-" field.
+func decodeIssue(data []byte) (*types.Issue, error) {
+	var f issueFile
+	if err := json.Unmarshal(data, &f); err != nil {
+		return nil, err
+	}
+	issue := f.Issue
+	issue.SourceRepo = f.FileSourceRepo
+	return &issue, nil
+}
+
 // writeIssue marshals and writes an issue to disk atomically.
 func (s *FlatFileStore) writeIssue(issue *types.Issue) error {
 	path, err := s.safeIssueFilename(issue.ID)
@@ -172,7 +192,7 @@ func (s *FlatFileStore) writeIssue(issue *types.Issue) error {
 		return err
 	}
 
-	data, err := json.MarshalIndent(issue, "", "  ")
+	data, err := json.MarshalIndent(issueFile{Issue: *issue, FileSourceRepo: issue.SourceRepo}, "", "  ")
 	if err != nil {
 		return fmt.Errorf("flatfile: marshal issue %s: %w", issue.ID, err)
 	}
