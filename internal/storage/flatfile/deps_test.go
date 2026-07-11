@@ -97,6 +97,13 @@ func TestRemoveDependencyNotFound(t *testing.T) {
 	if err != nil {
 		t.Errorf("RemoveDependency missing = %v, want nil (silent no-op)", err)
 	}
+
+	// A missing SOURCE issue is the same silent no-op: the SQL reference never
+	// validates source existence — it just finds no matching edge row.
+	err = s.RemoveDependency(ctx, "ghost-1", "d-1", "tester")
+	if err != nil {
+		t.Errorf("RemoveDependency missing source = %v, want nil (silent no-op)", err)
+	}
 }
 
 func TestGetDependenciesSkipsOnlyMissingAndExternal(t *testing.T) {

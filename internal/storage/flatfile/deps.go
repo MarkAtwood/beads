@@ -225,6 +225,12 @@ func (s *FlatFileStore) RemoveDependency(_ context.Context, issueID, dependsOnID
 
 	issue, err := s.readIssue(issueID)
 	if err != nil {
+		if errors.Is(err, storage.ErrNotFound) {
+			// issueops.RemoveDependencyInTx never validates source existence:
+			// a missing source simply has no matching edge row, so removal is
+			// part of the same silent no-op contract.
+			return nil
+		}
 		return err
 	}
 
