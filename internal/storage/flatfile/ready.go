@@ -324,14 +324,12 @@ func (s *FlatFileStore) GetEpicsEligibleForClosure(_ context.Context) ([]*types.
 	return result, nil
 }
 
+// isDeferred mirrors the SQL deferred clause (defer_until IS NULL OR
+// defer_until <= now): only a future defer_until hides an issue. Status alone
+// must not: an explicit Status=deferred filter still returns issues whose
+// defer_until is unset or past, matching sqlbuild.BuildReadyWorkWhere.
 func isDeferred(issue *types.Issue) bool {
-	if issue.Status == types.StatusDeferred {
-		return true
-	}
-	if issue.DeferUntil != nil && issue.DeferUntil.After(time.Now()) {
-		return true
-	}
-	return false
+	return issue.DeferUntil != nil && issue.DeferUntil.After(time.Now())
 }
 
 // matchesBasicWorkFilter applies the WorkFilter fields that are common to the

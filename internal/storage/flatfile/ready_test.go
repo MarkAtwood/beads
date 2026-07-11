@@ -3,9 +3,46 @@ package flatfile
 import (
 	"context"
 	"testing"
+	"time"
 
 	"github.com/steveyegge/beads/internal/types"
 )
+
+// SQL reference (sqlbuild.BuildReadyWorkWhere): an explicit Status filter is
+// applied verbatim, and the deferred clause is only
+// (defer_until IS NULL OR defer_until <= now). A status=deferred issue with
+// no future defer_until IS returned by Status=deferred on dolt/sqlite.
+func TestGetReadyWorkExplicitDeferredStatus(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+
+	future := time.Now().Add(24 * time.Hour)
+	s.CreateIssue(ctx, &types.Issue{ID: "def-1", Title: "Deferred no date", Status: types.StatusDeferred}, "tester")
+	s.CreateIssue(ctx, &types.Issue{ID: "def-2", Title: "Deferred future", Status: types.StatusDeferred, DeferUntil: &future}, "tester")
+	s.CreateIssue(ctx, &types.Issue{ID: "def-3", Title: "Open", Status: types.StatusOpen}, "tester")
+
+	ready, err := s.GetReadyWork(ctx, types.WorkFilter{Status: types.StatusDeferred})
+	if err != nil {
+		t.Fatalf("GetReadyWork: %v", err)
+	}
+	if len(ready) != 1 || ready[0].ID != "def-1" {
+		ids := make([]string, len(ready))
+		for i, r := range ready {
+			ids[i] = r.ID
+		}
+		t.Errorf("ready IDs = %v, want [def-1]", ids)
+	}
+
+	// Default filter still excludes deferred-status issues (status IN
+	// (open, in_progress)) — def-3 only.
+	ready, err = s.GetReadyWork(ctx, types.WorkFilter{})
+	if err != nil {
+		t.Fatalf("GetReadyWork default: %v", err)
+	}
+	if len(ready) != 1 || ready[0].ID != "def-3" {
+		t.Errorf("default ready = %v, want [def-3]", ready)
+	}
+}
 
 func TestGetReadyWorkNoDeps(t *testing.T) {
 	s := newTestStore(t)
