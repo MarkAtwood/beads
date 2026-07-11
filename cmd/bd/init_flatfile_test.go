@@ -347,3 +347,68 @@ func TestInitDefaultBackendRejectsDoltServerFlags(t *testing.T) {
 		})
 	}
 }
+
+// runGitIn runs a git command in dir, failing the test on error.
+func runGitIn(t *testing.T, dir string, args ...string) {
+	t.Helper()
+	cmd := exec.Command("git", args...)
+	cmd.Dir = dir
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("git %v: %v\n%s", args, err, out)
+	}
+}
+
+// TASKS-nfbg: `bd init` in a repo whose origin has refs/dolt/data used to
+// clone the team's Dolt database, print "Bootstrapped from remote", then
+// stamp metadata backend=flatfile — orphaning the just-cloned history while
+// bd list showed an empty store. With the backend defaulted, init must
+// refuse with guidance instead; with explicit --backend=flatfile it must
+// proceed fresh WITHOUT cloning.
+func TestInitDefaultBackendRefusesDoltOriginData(t *testing.T) {
+	bdBin := buildBDForInitTests(t)
+
+	work := t.TempDir()
+	origin := filepath.Join(t.TempDir(), "origin.git")
+	runGitIn(t, work, "init", "-q")
+	runGitIn(t, work, "init", "-q", "--bare", origin)
+	runGitIn(t, work, "remote", "add", "origin", origin)
+	if err := os.WriteFile(filepath.Join(work, "seed.txt"), []byte("seed\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	runGitIn(t, work, "add", "seed.txt")
+	runGitIn(t, work, "-c", "user.email=t@example.com", "-c", "user.name=t", "commit", "-q", "-m", "seed")
+	runGitIn(t, work, "push", "-q", "origin", "HEAD:refs/dolt/data")
+
+	// Defaulted backend: refuse, never clone-then-stamp.
+	out, err := runBDInDir(t, bdBin, work, "init", "--prefix", "tst", "--quiet", "--skip-hooks", "--skip-agents")
+	if err == nil {
+		t.Fatalf("plain bd init with Dolt data on origin succeeded; want refusal\n%s", out)
+	}
+	if !strings.Contains(out, "--backend=dolt") || !strings.Contains(out, "--backend=flatfile") {
+		t.Errorf("refusal does not offer both --backend=dolt and --backend=flatfile:\n%s", out)
+	}
+	if strings.Contains(out, "Bootstrapped from remote") {
+		t.Errorf("init bootstrapped from the Dolt remote despite the flatfile default:\n%s", out)
+	}
+	if _, statErr := os.Stat(filepath.Join(work, ".beads", "metadata.json")); !os.IsNotExist(statErr) {
+		t.Errorf("refusal still stamped metadata.json (stat err: %v)", statErr)
+	}
+
+	// Explicit --backend=flatfile: proceed fresh, no Dolt clone artifacts.
+	out, err = runBDInDir(t, bdBin, work, "init", "--backend=flatfile", "--prefix", "tst", "--quiet", "--skip-hooks", "--skip-agents")
+	if err != nil {
+		t.Fatalf("bd init --backend=flatfile with Dolt data on origin failed: %v\n%s", err, out)
+	}
+	meta, err := os.ReadFile(filepath.Join(work, ".beads", "metadata.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(meta), `"backend":"flatfile"`) {
+		t.Errorf("metadata.json backend is not flatfile: %s", meta)
+	}
+	for _, doltDir := range []string{"embeddeddolt", "dolt"} {
+		if _, statErr := os.Stat(filepath.Join(work, ".beads", doltDir)); !os.IsNotExist(statErr) {
+			t.Errorf("explicit flatfile init left Dolt artifact .beads/%s (stat err: %v)", doltDir, statErr)
+		}
+	}
+}
