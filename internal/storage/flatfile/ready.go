@@ -58,8 +58,19 @@ func (s *FlatFileStore) GetReadyWork(ctx context.Context, filter types.WorkFilte
 		if issue.Pinned || blocked[issue.ID] {
 			continue
 		}
-		if issue.Ephemeral && !filter.IncludeEphemeral {
-			continue
+		if issue.Ephemeral {
+			if !filter.IncludeEphemeral {
+				continue
+			}
+			// MolType/WispType only constrain the wisp arm of the SQL ready
+			// set (issueops.readyWorkWispIssueFilter); durable issues pass
+			// regardless. Flatfile wisps are the ephemeral issues.
+			if filter.MolType != nil && issue.MolType != *filter.MolType {
+				continue
+			}
+			if filter.WispType != nil && issue.WispType != *filter.WispType {
+				continue
+			}
 		}
 		if filter.Type != "" {
 			if string(issue.IssueType) != filter.Type {
@@ -76,6 +87,9 @@ func (s *FlatFileStore) GetReadyWork(ctx context.Context, filter types.WorkFilte
 		// Explicit transitive descendants, plus the sqlbuild implicit-child
 		// fallback: a dotted-prefix ID with no parent-child dep at all.
 		if filter.ParentID != nil && !descendants[issue.ID] && !isImplicitDottedChild(issue, *filter.ParentID) {
+			continue
+		}
+		if filter.MoleculeID != "" && !isMoleculeMember(issue, filter.MoleculeID) {
 			continue
 		}
 		if !matchesBasicWorkFilter(issue, filter) {
@@ -144,6 +158,18 @@ func isImplicitDottedChild(issue *types.Issue, parentID string) bool {
 		}
 	}
 	return true
+}
+
+// isMoleculeMember mirrors the sqlbuild MoleculeID clause: a direct
+// parent-child dependency on moleculeID, or a dotted-prefix ID with no
+// explicit parent-child dependency at all.
+func isMoleculeMember(issue *types.Issue, moleculeID string) bool {
+	for _, dep := range issue.Dependencies {
+		if dep.Type == types.DepParentChild && dep.DependsOnID == moleculeID {
+			return true
+		}
+	}
+	return isImplicitDottedChild(issue, moleculeID)
 }
 
 // childrenOfDeferredParents returns IDs of issues whose parent has a future
