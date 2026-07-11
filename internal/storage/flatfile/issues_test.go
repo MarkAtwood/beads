@@ -561,6 +561,73 @@ func TestReadIssueIntegerBooleans(t *testing.T) {
 	}
 }
 
+// Extends TestReadIssueIntegerBooleans: a raw Dolt SQL export row carries BOTH
+// MySQL datetimes and TINYINT booleans (both repairs cite the same source, so
+// co-occurrence is the expected case). The repairs must compose — a file
+// needing both must not be dropped as corrupt.
+func TestReadIssueCombinedTimestampAndTypeRepairs(t *testing.T) {
+	s := newTestStore(t)
+
+	issueJSON := `{
+  "id": "corrupt-both-1",
+  "title": "Combined repairs",
+  "status": "open",
+  "priority": 2,
+  "ephemeral": 0,
+  "is_template": 0,
+  "pinned": 1,
+  "content_hash": "abc123",
+  "created_at": "2026-06-22 14:31:53",
+  "updated_at": "2026-06-22 14:31:53",
+  "dependencies": [
+    {
+      "issue_id": "corrupt-both-1",
+      "depends_on_id": "corrupt-2",
+      "type": "relates-to",
+      "created_at": "2026-06-22 14:31:53",
+      "metadata": {}
+    }
+  ]
+}
+`
+	if err := os.WriteFile(s.issueFilename("corrupt-both-1"), []byte(issueJSON), 0o644); err != nil {
+		t.Fatalf("write issue file: %v", err)
+	}
+
+	got, err := s.readIssue("corrupt-both-1")
+	if err != nil {
+		t.Fatalf("readIssue with combined MySQL datetimes and int booleans: %v", err)
+	}
+	want := time.Date(2026, 6, 22, 14, 31, 53, 0, time.UTC)
+	if !got.CreatedAt.Equal(want) {
+		t.Errorf("created_at = %v, want %v", got.CreatedAt, want)
+	}
+	if got.Ephemeral {
+		t.Error("ephemeral should be false")
+	}
+	if !got.Pinned {
+		t.Error("pinned should be true")
+	}
+	if len(got.Dependencies) != 1 {
+		t.Fatalf("got %d dependencies, want 1", len(got.Dependencies))
+	}
+	if got.Dependencies[0].Metadata != "{}" {
+		t.Errorf("dep metadata = %q, want %q", got.Dependencies[0].Metadata, "{}")
+	}
+	if !got.Dependencies[0].CreatedAt.Equal(want) {
+		t.Errorf("dep created_at = %v, want %v", got.Dependencies[0].CreatedAt, want)
+	}
+
+	// The combined file must also survive loadAllIssues (no corrupt-skip).
+	issues, err := s.loadAllIssues()
+	if err != nil {
+		t.Fatalf("loadAllIssues: %v", err)
+	}
+	if len(issues) != 1 || issues[0].ID != "corrupt-both-1" {
+		t.Fatalf("loadAllIssues = %d issues, want the repaired one", len(issues))
+	}
+}
+
 func TestLoadAllIssuesSkipsCorrupt(t *testing.T) {
 	s := newTestStore(t)
 
