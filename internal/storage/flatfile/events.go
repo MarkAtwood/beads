@@ -162,6 +162,12 @@ func (s *FlatFileStore) GetAllEventsSince(_ context.Context, since time.Time) ([
 			continue
 		}
 		issueID := strings.TrimSuffix(e.Name(), ".jsonl")
+		// Stray files whose names are not valid issue IDs (e.g. macOS
+		// AppleDouble "._TASKS-1.jsonl") are not ours: skip them instead
+		// of failing the whole store-wide scan.
+		if validateID(issueID) != nil {
+			continue
+		}
 		events, err := s.readEventsFile(issueID)
 		if err != nil {
 			return nil, err

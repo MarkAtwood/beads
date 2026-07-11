@@ -2,6 +2,7 @@ package flatfile
 
 import (
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -90,5 +91,36 @@ func TestReadEventsTolerantOfTornLine(t *testing.T) {
 	}
 	if _, err := s.GetAllEventsSince(ctx, time.Time{}); err != nil {
 		t.Errorf("GetAllEventsSince with torn line: %v", err)
+	}
+}
+
+// SQL reference semantics: the events query never sees stray filesystem
+// artifacts. A dotfile like macOS AppleDouble "._TASKS-1.jsonl" in the events
+// dir must not fail the store-wide scan.
+func TestGetAllEventsSinceSkipsStrayDotfiles(t *testing.T) {
+	s := newTestStore(t)
+
+	issue := &types.Issue{ID: "real-1", Title: "Real"}
+	if err := s.CreateIssue(ctx, issue, "tester"); err != nil {
+		t.Fatalf("CreateIssue: %v", err)
+	}
+
+	stray := filepath.Join(s.eventsDir, "._real-1.jsonl")
+	if err := os.WriteFile(stray, []byte("\x00\x05\x16\x07AppleDouble junk"), 0o644); err != nil {
+		t.Fatalf("write stray dotfile: %v", err)
+	}
+
+	events, err := s.GetAllEventsSince(ctx, time.Time{})
+	if err != nil {
+		t.Fatalf("GetAllEventsSince with stray dotfile: %v", err)
+	}
+	found := false
+	for _, ev := range events {
+		if ev.IssueID == "real-1" && ev.EventType == types.EventCreated {
+			found = true
+		}
+	}
+	if !found {
+		t.Error("real issue's created event missing from scan")
 	}
 }
