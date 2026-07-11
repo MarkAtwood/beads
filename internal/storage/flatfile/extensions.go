@@ -1173,8 +1173,12 @@ func (s *FlatFileStore) ImportIssueComment(_ context.Context, issueID, author, t
 		}
 		return nil, err
 	}
+	// Mint a unique ID: issueops.ImportIssueCommentInTx mints a fresh UUIDv7
+	// per call, so two comments sharing a created_at (second-granular Dolt
+	// DATETIME exports) must both survive. A bare UnixNano would collide and
+	// the second writeCommentFile would silently replace the first.
 	comment := &types.Comment{
-		ID:        fmt.Sprintf("%d", createdAt.UnixNano()),
+		ID:        fmt.Sprintf("%d-%d", createdAt.UnixNano(), s.commentSeq.Add(1)),
 		IssueID:   issueID,
 		Author:    author,
 		Text:      text,
@@ -1195,7 +1199,8 @@ func (s *FlatFileStore) ImportComment(_ context.Context, comment *types.Comment)
 		return err
 	}
 	if comment.ID == "" {
-		comment.ID = fmt.Sprintf("%d", comment.CreatedAt.UnixNano())
+		// Seq suffix keeps same-created_at minted IDs (and filenames) distinct.
+		comment.ID = fmt.Sprintf("%d-%d", comment.CreatedAt.UnixNano(), s.commentSeq.Add(1))
 	}
 	return s.writeCommentFile(comment)
 }
