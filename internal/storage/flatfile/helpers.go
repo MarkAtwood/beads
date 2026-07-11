@@ -28,7 +28,14 @@ func validateID(id string) error {
 	return nil
 }
 
-// safePath constructs a path under parentDir and verifies the result doesn't escape.
+// safePath constructs a path under parentDir and verifies the result doesn't
+// escape. Containment is checked lexically, and parentDir and the result are
+// Lstat'd to reject symlinks: .beads is git-synced, so a hostile repo can
+// commit a symlink under it (e.g. comments/BD-1 -> ~/.config) that a plain
+// git checkout materializes; following it would read or write outside the
+// store. The Lstat is a pre-flight check, which is sufficient for that
+// static, checkout-materialized threat; it does not defend against a local
+// process racing symlinks into place between check and use.
 func safePath(parentDir, child, ext string) (string, error) {
 	if err := validateID(child); err != nil {
 		return "", err
@@ -46,7 +53,28 @@ func safePath(parentDir, child, ext string) (string, error) {
 	if !strings.HasPrefix(abs, absParent+string(filepath.Separator)) && abs != absParent {
 		return "", fmt.Errorf("flatfile: path %q escapes directory %q", result, parentDir)
 	}
+	for _, p := range []string{parentDir, result} {
+		if err := rejectSymlink(p); err != nil {
+			return "", err
+		}
+	}
 	return result, nil
+}
+
+// rejectSymlink returns an error if path exists and is a symlink. A missing
+// path is fine: the caller creates it as a regular file or directory.
+func rejectSymlink(path string) error {
+	fi, err := os.Lstat(path)
+	if err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			return nil
+		}
+		return fmt.Errorf("flatfile: lstat %s: %w", path, err)
+	}
+	if fi.Mode()&fs.ModeSymlink != 0 {
+		return fmt.Errorf("flatfile: path %q is a symlink; refusing to follow it outside the store", path)
+	}
+	return nil
 }
 
 // atomicWriteFile writes data to path durably and atomically: a uniquely-named
