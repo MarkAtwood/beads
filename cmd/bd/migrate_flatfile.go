@@ -120,8 +120,8 @@ either migration can be retried, and can be removed afterwards.`,
 		// config would print success and invite 'rm -rf .beads/dolt'.
 		abortMigration := func(format string, args ...interface{}) error {
 			_ = ffStore.Close()
-			return HandleError("%s\n\nMigration aborted: the Dolt data is untouched and the workspace still routes to Dolt.\nFix the cause, remove the partial flat-file output, and re-run:\n  rm -rf %s/issues %s/comments %s/config_kv.json\n  bd migrate flatfile",
-				fmt.Sprintf(format, args...), beadsDir, beadsDir, beadsDir)
+			return HandleError("%s\n\nMigration aborted: the Dolt data is untouched and the workspace still routes to Dolt.\nFix the cause, remove the partial flat-file output, and re-run:\n  %s\n  bd migrate flatfile",
+				fmt.Sprintf(format, args...), flatfileDataCleanup(beadsDir))
 		}
 
 		// Migrate issues.
@@ -232,6 +232,18 @@ either migration can be retried, and can be removed afterwards.`,
 		fmt.Printf("  rm -rf %s/dolt %s/embeddeddolt\n", beadsDir, beadsDir)
 		return nil
 	},
+}
+
+// flatfileDataCleanup returns the rm -rf command covering every flat-file
+// artifact the forward migration writes: issues/, comments/, events/
+// (CreateIssue appends created and label_added events per issue), and
+// config_kv.json. Shared by the forward abort advice and the reverse
+// success message so the two lists cannot drift — an abort cleanup that
+// missed events/ made the retry append a second created event per issue,
+// permanently duplicating the audit trail.
+func flatfileDataCleanup(beadsDir string) string {
+	return fmt.Sprintf("rm -rf %s/issues %s/comments %s/events %s/config_kv.json",
+		beadsDir, beadsDir, beadsDir, beadsDir)
 }
 
 // mutateMetadataFile rewrites .beads/metadata.json via read → mutate →
@@ -422,8 +434,7 @@ func runFlatfileReverseMigration(beadsDir string, dryRun bool) error {
 
 	fmt.Println("\nMigration complete. The Dolt backend is now active.")
 	fmt.Println("The flat-file data is no longer used and can be removed:")
-	fmt.Printf("  rm -rf %s/issues %s/comments %s/events %s/config_kv.json\n",
-		beadsDir, beadsDir, beadsDir, beadsDir)
+	fmt.Printf("  %s\n", flatfileDataCleanup(beadsDir))
 	return nil
 }
 
