@@ -6,9 +6,12 @@
 package flatfile
 
 import (
+	"bytes"
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
+	"strconv"
 	"sync"
 	"sync/atomic"
 )
@@ -58,14 +61,21 @@ type FlatFileStore struct {
 	// of scope: the flat-file store assumes one writing process per checkout.
 	writeMu sync.Mutex
 
-	// txMu serializes transactions: RunInTransaction holds it for the whole
-	// callback so two concurrent transactions cannot interleave journaled
-	// writes (SQL backends get this from database transactions). Nested
-	// RunInTransaction calls would self-deadlock and are unsupported, as on
-	// the SQL backends. journal is the active transaction's pre-image map
-	// (nil outside a transaction), guarded by journalMu because writes from
-	// callback-spawned goroutines may journal concurrently.
-	txMu      sync.Mutex
+	// txMu isolates transactions from every other write. RunInTransaction
+	// holds the write half for the whole callback, so two transactions cannot
+	// interleave journaled writes AND no non-transactional mutation can land
+	// while a journal is active (SQL backends never roll back another
+	// session's committed write; without this exclusion a concurrent plain
+	// write would be captured in the foreign journal and reverted). Non-tx
+	// mutators take the read half via txShared/lockWrite — see those helpers
+	// for the lock order (txMu → writeMu → mu/kvMu) and the goroutine-owner
+	// reentrancy rule. txOwner is the goroutine ID of the active transaction
+	// (0 when none). Nested RunInTransaction calls would self-deadlock and
+	// are unsupported, as on the SQL backends. journal is the active
+	// transaction's pre-image map (nil outside a transaction), guarded by
+	// journalMu.
+	txMu      sync.RWMutex
+	txOwner   atomic.Int64
 	journalMu sync.Mutex
 	journal   map[string]journalEntry
 
@@ -117,6 +127,53 @@ func newFlatFileStoreNoCreate(beadsDir string) (*FlatFileStore, error) {
 	}
 
 	return s, nil
+}
+
+// goroutineID returns the current goroutine's ID, parsed from the
+// "goroutine <id> [<state>]:" header runtime.Stack has emitted since Go 1.0.
+// Used only to let the transaction goroutine's own mutations skip txMu's
+// read half (it already holds the write half); goroutine IDs are never
+// stored beyond the transaction span or used for anything else.
+func goroutineID() int64 {
+	buf := make([]byte, 64)
+	n := runtime.Stack(buf, false)
+	header := buf[:n]
+	header = bytes.TrimPrefix(header, []byte("goroutine "))
+	if i := bytes.IndexByte(header, ' '); i >= 0 {
+		header = header[:i]
+	}
+	id, _ := strconv.ParseInt(string(header), 10, 64)
+	return id
+}
+
+// txShared acquires txMu's read half so the caller's mutation cannot overlap
+// an active transaction (and thus can never be captured in a foreign journal
+// and reverted by its rollback). It returns the matching release func. The
+// goroutine running RunInTransaction's callback already holds the write half,
+// so its (promoted) mutations skip the read half by owner match — which is
+// why mutations inside a transaction callback MUST run on the goroutine that
+// called RunInTransaction: a callback-spawned goroutine's mutation blocks
+// until the transaction completes. Like writeMu, txShared is not reentrant:
+// a holder must not call another txShared/lockWrite-taking method.
+func (s *FlatFileStore) txShared() func() {
+	if s.txOwner.Load() == goroutineID() {
+		return func() {}
+	}
+	s.txMu.RLock()
+	return s.txMu.RUnlock
+}
+
+// lockWrite acquires txShared then writeMu — the required order (txMu before
+// writeMu, matching rollbackJournal, which takes writeMu while the write half
+// of txMu is held) — and returns the combined release func. Every exported
+// mutator that previously took writeMu directly goes through it.
+func (s *FlatFileStore) lockWrite() func() {
+	release := s.txShared()
+	s.writeMu.Lock()
+	return func() {
+		s.writeMu.Unlock()
+		release()
+	}
 }
 
 // Close marks the store as closed. Subsequent operations should return an error.

@@ -16,8 +16,7 @@ func (s *FlatFileStore) AddLabel(_ context.Context, issueID, label, actor string
 	if err := s.checkClosed(); err != nil {
 		return err
 	}
-	s.writeMu.Lock()
-	defer s.writeMu.Unlock()
+	defer s.lockWrite()()
 
 	issue, err := s.readIssue(issueID)
 	if err != nil {
@@ -48,8 +47,7 @@ func (s *FlatFileStore) RemoveLabel(_ context.Context, issueID, label, actor str
 	if err := s.checkClosed(); err != nil {
 		return err
 	}
-	s.writeMu.Lock()
-	defer s.writeMu.Unlock()
+	defer s.lockWrite()()
 
 	issue, err := s.readIssue(issueID)
 	if err != nil {

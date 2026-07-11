@@ -177,8 +177,7 @@ func (s *FlatFileStore) AddDependency(_ context.Context, dep *types.Dependency, 
 	if err := s.checkClosed(); err != nil {
 		return err
 	}
-	s.writeMu.Lock()
-	defer s.writeMu.Unlock()
+	defer s.lockWrite()()
 
 	source, err := s.readIssue(dep.IssueID)
 	if err != nil {
@@ -262,8 +261,7 @@ func (s *FlatFileStore) RemoveDependency(_ context.Context, issueID, dependsOnID
 	if err := s.checkClosed(); err != nil {
 		return err
 	}
-	s.writeMu.Lock()
-	defer s.writeMu.Unlock()
+	defer s.lockWrite()()
 
 	issue, err := s.readIssue(issueID)
 	if err != nil {

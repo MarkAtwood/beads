@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/types"
@@ -325,5 +326,61 @@ func TestRollbackRestoresCascadeDeletedCommentFiles(t *testing.T) {
 		if !bytes.Equal(got, want) {
 			t.Errorf("after rollback, %s differs from pre-transaction content", path)
 		}
+	}
+}
+
+// SQL backends never revert another session's committed write when a
+// transaction rolls back. A non-transactional mutation that arrives while a
+// transaction is active must therefore never be captured in that (foreign)
+// transaction's journal: it is held until the transaction completes and then
+// applied, surviving the rollback.
+func TestRollbackDoesNotRevertConcurrentNonTxWrite(t *testing.T) {
+	s := newTestStore(t)
+	const id = "iso-1"
+	if err := s.CreateIssue(ctx, &types.Issue{ID: id, Title: "isolation"}, "t"); err != nil {
+		t.Fatalf("CreateIssue: %v", err)
+	}
+
+	txStarted := make(chan struct{})
+	labelDone := make(chan error, 1)
+	go func() {
+		<-txStarted
+		labelDone <- s.AddLabel(ctx, id, "survivor", "other-goroutine")
+	}()
+
+	sentinel := errors.New("boom")
+	err := s.RunInTransaction(ctx, "", func(tx storage.Transaction) error {
+		// Journal the issue's pre-image (no label) inside the transaction.
+		if err := tx.UpdateIssue(ctx, id, map[string]interface{}{"title": "in-tx"}, "t"); err != nil {
+			return err
+		}
+		close(txStarted)
+		// Give the other goroutine time to attempt its non-tx AddLabel while
+		// this transaction is still open. Pre-fix it would run here and be
+		// journaled; post-fix it blocks until the transaction completes.
+		select {
+		case err := <-labelDone:
+			labelDone <- err
+			t.Error("non-tx AddLabel completed inside an open transaction")
+		case <-time.After(100 * time.Millisecond):
+		}
+		return sentinel
+	})
+	if !errors.Is(err, sentinel) {
+		t.Fatalf("RunInTransaction error = %v, want sentinel", err)
+	}
+
+	if err := <-labelDone; err != nil {
+		t.Fatalf("concurrent AddLabel: %v", err)
+	}
+	got, err := s.GetIssue(ctx, id)
+	if err != nil {
+		t.Fatalf("GetIssue: %v", err)
+	}
+	if got.Title != "isolation" {
+		t.Errorf("title = %q, want %q (tx update not rolled back)", got.Title, "isolation")
+	}
+	if len(got.Labels) != 1 || got.Labels[0] != "survivor" {
+		t.Errorf("labels = %v, want [survivor] (committed non-tx write reverted by foreign rollback)", got.Labels)
 	}
 }

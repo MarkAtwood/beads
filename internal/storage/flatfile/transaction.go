@@ -29,8 +29,16 @@ func (s *FlatFileStore) RunInTransaction(ctx context.Context, commitMsg string, 
 	if err := s.checkClosed(); err != nil {
 		return err
 	}
+	// Hold txMu's write half for the whole span: concurrent transactions and
+	// every non-transactional mutation (txShared read-lockers) are excluded,
+	// so nothing foreign is ever journaled — a rollback can only revert this
+	// transaction's own writes. txOwner lets the callback's own mutations,
+	// which run on this goroutine, skip the read half (see txShared); it is
+	// cleared before txMu is released (deferred LIFO).
 	s.txMu.Lock()
 	defer s.txMu.Unlock()
+	s.txOwner.Store(goroutineID())
+	defer s.txOwner.Store(0)
 
 	s.journalMu.Lock()
 	s.journal = make(map[string]journalEntry)

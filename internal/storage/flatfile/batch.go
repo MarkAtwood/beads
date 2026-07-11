@@ -45,8 +45,7 @@ func (s *FlatFileStore) CreateIssuesWithFullOptions(ctx context.Context, issues 
 	// in-memory plan cannot be invalidated by a concurrent mutation. No
 	// callee below takes writeMu (ImportComment writes comment files
 	// only, and events are append-only).
-	s.writeMu.Lock()
-	defer s.writeMu.Unlock()
+	defer s.lockWrite()()
 
 	// All-wisp batches force Ephemeral (mirrors sqlkit).
 	if issueops.AllWisps(issues) {

@@ -21,6 +21,7 @@ func (s *FlatFileStore) SetConfig(_ context.Context, key, value string) error {
 	if err := s.checkClosed(); err != nil {
 		return err
 	}
+	defer s.txShared()()
 	switch key {
 	case "status.custom":
 		if err := s.syncCustomStatuses(value); err != nil {
@@ -55,6 +56,7 @@ func (s *FlatFileStore) SetLocalMetadata(_ context.Context, key, value string) e
 	if err := s.checkClosed(); err != nil {
 		return err
 	}
+	defer s.txShared()()
 	return s.setKV(s.localMetaPath, key, value)
 }
 

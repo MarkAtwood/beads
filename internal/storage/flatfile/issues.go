@@ -348,8 +348,7 @@ func (s *FlatFileStore) CreateIssue(ctx context.Context, issue *types.Issue, act
 	if err := s.checkClosed(); err != nil {
 		return err
 	}
-	s.writeMu.Lock()
-	defer s.writeMu.Unlock()
+	defer s.lockWrite()()
 
 	// Shared with the batch path: metadata/field validation plus
 	// timestamp/status defaults and closed_at derivation (mirrors
@@ -492,8 +491,7 @@ func (s *FlatFileStore) UpdateIssue(ctx context.Context, id string, updates map[
 	if err := s.checkClosed(); err != nil {
 		return err
 	}
-	s.writeMu.Lock()
-	defer s.writeMu.Unlock()
+	defer s.lockWrite()()
 
 	issue, err := s.readIssue(id)
 	if err != nil {
@@ -665,8 +663,7 @@ func (s *FlatFileStore) CloseIssue(_ context.Context, id string, reason string, 
 	if err := s.checkClosed(); err != nil {
 		return err
 	}
-	s.writeMu.Lock()
-	defer s.writeMu.Unlock()
+	defer s.lockWrite()()
 
 	issue, err := s.readIssue(id)
 	if err != nil {
@@ -697,8 +694,7 @@ func (s *FlatFileStore) DeleteIssue(_ context.Context, id string) error {
 	if err := s.checkClosed(); err != nil {
 		return err
 	}
-	s.writeMu.Lock()
-	defer s.writeMu.Unlock()
+	defer s.lockWrite()()
 
 	if err := s.removeIssueFile(id); err != nil {
 		return err
