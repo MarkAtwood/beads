@@ -138,7 +138,12 @@ func computeBlockedSet(all []*types.Issue) map[string]bool {
 					blocked[issue.ID] = true
 					break
 				}
-			} else if dep.Type == types.DepWaitsFor {
+			} else if dep.Type == types.DepWaitsFor && !isExternalDepTarget(dep.DependsOnID) {
+				// "external:" targets are DepTargetExternal on every SQL
+				// write path (issueops.ClassifyDepTarget checks the string
+				// prefix unconditionally), and waitsForGateBlockedSQL joins
+				// only the typed id columns — such an edge never gates, even
+				// when local children reference the same external spawner.
 				if waitsForGateBlocks(dep.Metadata, hasActiveChild[dep.DependsOnID], hasClosedChild[dep.DependsOnID]) {
 					blocked[issue.ID] = true
 					break

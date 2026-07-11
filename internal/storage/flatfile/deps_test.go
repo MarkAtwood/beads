@@ -359,3 +359,57 @@ func TestGetDependencyTreeMissingRoot(t *testing.T) {
 		t.Errorf("GetDependencyTree(maxDepth=0) = (%v, %v), want empty, nil", tree, err)
 	}
 }
+
+// The SQL wrappers classify "external:" dependency targets as
+// DepTargetExternal on every write path (issueops.ClassifyDepTarget checks
+// the string prefix unconditionally, before any cross-prefix logic), storing
+// them in depends_on_external — a column waitsForGateBlockedSQL never joins.
+// A waits-for edge to an "external:" spawner therefore never gates in Dolt,
+// even when local issues carry parent-child edges naming the same external
+// spawner (both edge kinds are reachable via ordinary `bd dep add`, which
+// skips existence validation for external targets).
+func TestComputeBlockedSetExternalWaitsForNeverGates(t *testing.T) {
+	mk := func(id string, st types.Status, deps ...*types.Dependency) *types.Issue {
+		return &types.Issue{ID: id, Title: id, Status: st, Dependencies: deps}
+	}
+	edge := func(src, target string, typ types.DependencyType) *types.Dependency {
+		return &types.Dependency{IssueID: src, DependsOnID: target, Type: typ}
+	}
+
+	issues := []*types.Issue{
+		mk("w-1", types.StatusOpen, edge("w-1", "external:rig-7", types.DepWaitsFor)),
+		mk("w-2", types.StatusOpen, edge("w-2", "external:rig-7", types.DepParentChild)),
+	}
+	if computeBlockedSet(issues)["w-1"] {
+		t.Error("blocked[w-1] = true: waits-for edge to external: spawner gated on local children; SQL classifies the edge depends_on_external and never blocks")
+	}
+}
+
+// Store-level wiring for the same rule: the waiter stays in bd ready.
+func TestGetReadyWorkExternalWaitsForDoesNotBlock(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+
+	s.CreateIssue(ctx, &types.Issue{ID: "x-wait", Title: "Waiter"}, "tester")
+	s.CreateIssue(ctx, &types.Issue{ID: "x-child", Title: "Child of external spawner"}, "tester")
+	if err := s.AddDependency(ctx, &types.Dependency{IssueID: "x-wait", DependsOnID: "external:rig-7", Type: types.DepWaitsFor}, "tester"); err != nil {
+		t.Fatalf("AddDependency waits-for external: %v", err)
+	}
+	if err := s.AddDependency(ctx, &types.Dependency{IssueID: "x-child", DependsOnID: "external:rig-7", Type: types.DepParentChild}, "tester"); err != nil {
+		t.Fatalf("AddDependency parent-child external: %v", err)
+	}
+
+	ready, err := s.GetReadyWork(ctx, types.WorkFilter{})
+	if err != nil {
+		t.Fatalf("GetReadyWork: %v", err)
+	}
+	found := false
+	for _, issue := range ready {
+		if issue.ID == "x-wait" {
+			found = true
+		}
+	}
+	if !found {
+		t.Error("x-wait missing from ready work: external: waits-for edge blocked it")
+	}
+}
