@@ -536,13 +536,23 @@ func matchesFilter(issue *types.Issue, f types.IssueFilter, labelRe *regexp.Rege
 
 	// Parent filtering — requires scanning deps for parent-child type.
 	// ParentID and NoParent are handled via the dependencies array.
+	// SQL contract (sqlbuild/filter.go ParentID clause): match an explicit
+	// parent-child dep on ParentID, OR an implicit dotted-ID child — id has
+	// prefix "parent." and NO parent-child dep at all.
 	if f.ParentID != nil {
 		found := false
+		hasParentDep := false
 		for _, dep := range issue.Dependencies {
-			if dep.Type == types.DepParentChild && dep.DependsOnID == *f.ParentID {
-				found = true
-				break
+			if dep.Type == types.DepParentChild {
+				hasParentDep = true
+				if dep.DependsOnID == *f.ParentID {
+					found = true
+					break
+				}
 			}
+		}
+		if !found && !hasParentDep && strings.HasPrefix(issue.ID, *f.ParentID+".") {
+			found = true
 		}
 		if !found {
 			return false
