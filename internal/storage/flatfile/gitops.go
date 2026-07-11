@@ -106,7 +106,12 @@ func (s *FlatFileStore) ListBranches(ctx context.Context) ([]string, error) {
 }
 
 func (s *FlatFileStore) Commit(ctx context.Context, message string) error {
-	_, _ = s.git(ctx, "add", ".beads/")
+	// The add error must propagate: the pathspec commit below exits 0 with
+	// only the TRACKED files, so a failed add (index.lock held, perms, disk
+	// full) would silently drop new issue files from the commit.
+	if _, err := s.git(ctx, "add", ".beads/"); err != nil {
+		return err
+	}
 	_, err := s.git(ctx, "commit", "-m", message, "--", ".beads/")
 	return err
 }
@@ -138,7 +143,11 @@ func (s *FlatFileStore) CommitPending(ctx context.Context, _ string) (bool, erro
 	if out == "" {
 		return false, nil
 	}
-	_, _ = s.git(ctx, "add", ".beads/")
+	// Like Commit: a swallowed add error would let the pathspec commit
+	// succeed with new issue files silently left untracked.
+	if _, err := s.git(ctx, "add", ".beads/"); err != nil {
+		return false, err
+	}
 	// Pathspec-scoped like Commit: an unrestricted commit would sweep the
 	// user's own staged files into a bd auto-commit.
 	_, err = s.git(ctx, "commit", "-m", "bd: auto-commit pending changes", "--", ".beads/")
