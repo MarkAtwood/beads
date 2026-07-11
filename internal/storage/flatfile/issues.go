@@ -703,12 +703,6 @@ func (s *FlatFileStore) DeleteIssue(_ context.Context, id string) error {
 	if err := s.removeIssueFile(id); err != nil {
 		return err
 	}
-	if err := s.removeFile(path); err != nil {
-		if errors.Is(err, fs.ErrNotExist) {
-			return storage.ErrNotFound
-		}
-		return fmt.Errorf("flatfile: delete issue %s: %w", id, err)
-	}
 	return s.removeIssueChildFiles(id)
 }
 
