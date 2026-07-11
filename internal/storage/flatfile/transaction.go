@@ -4,6 +4,7 @@ import (
 	"context"
 
 	"github.com/steveyegge/beads/internal/storage"
+	"github.com/steveyegge/beads/internal/storage/issueops"
 	"github.com/steveyegge/beads/internal/types"
 )
 
@@ -45,64 +46,22 @@ func (tx *flatFileTx) GetDependencyRecords(_ context.Context, issueID string) ([
 	return issue.Dependencies, nil
 }
 
+// CycleThroughEdges reports a rendered blocking cycle through one of the new
+// edges, mirroring the SQL backends: the graph is blocking-only
+// (blocks/conditional-blocks — 'related' and 'discovered-from' edges cannot
+// form blocking cycles), and rendering is delegated to the shared
+// issueops.CycleThroughEdgesInGraph. Flat-file writes land on disk inside the
+// transaction, so loadAllIssues already sees the new edges, as the shared
+// renderer requires.
 func (tx *flatFileTx) CycleThroughEdges(_ context.Context, edges [][2]string) (string, error) {
 	if len(edges) == 0 {
 		return "", nil
 	}
-
-	// Build the full dependency graph from all issues on disk.
 	all, err := tx.loadAllIssues()
 	if err != nil {
 		return "", err
 	}
-	adj := make(map[string][]string)
-	for _, issue := range all {
-		for _, dep := range issue.Dependencies {
-			if dep.Type != types.DepParentChild {
-				adj[issue.ID] = append(adj[issue.ID], dep.DependsOnID)
-			}
-		}
-	}
-
-	// DFS cycle detection: for each new edge's source, walk the graph
-	// looking for a cycle that includes that edge.
-	for _, e := range edges {
-		target := e[1]
-		start := e[0] // issue that depends on target
-		// A cycle exists if we can reach start from target via the graph.
-		visited := make(map[string]bool)
-		var path []string
-		if findPath(adj, target, start, visited, &path) {
-			cycle := target
-			for _, id := range path {
-				cycle += " -> " + id
-			}
-			cycle += " -> " + target
-			return cycle, nil
-		}
-	}
-	return "", nil
-}
-
-// findPath does DFS from 'from' looking for 'to'. Returns true if reachable,
-// with path containing the intermediate nodes.
-func findPath(adj map[string][]string, from, to string, visited map[string]bool, path *[]string) bool {
-	if from == to {
-		*path = append(*path, to)
-		return true
-	}
-	if visited[from] {
-		return false
-	}
-	visited[from] = true
-	*path = append(*path, from)
-	for _, next := range adj[from] {
-		if findPath(adj, next, to, visited, path) {
-			return true
-		}
-	}
-	*path = (*path)[:len(*path)-1]
-	return false
+	return issueops.CycleThroughEdgesInGraph(blockingAdjacency(all), edges), nil
 }
 
 // SetMetadata / GetMetadata mirror the store methods but without the
