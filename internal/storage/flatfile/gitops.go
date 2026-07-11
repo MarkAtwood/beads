@@ -41,7 +41,7 @@ func (s *FlatFileStore) git(ctx context.Context, args ...string) (string, error)
 
 // gitErrContains reports whether err (from s.git, which embeds git's stderr)
 // matches one of the expected benign failure messages. Anything else — missing
-// git binary, corrupted repo, cancelled context — must be propagated, not
+// git binary, corrupted repo, canceled context — must be propagated, not
 // collapsed into an empty result.
 func gitErrContains(err error, substrs ...string) bool {
 	if err == nil {
@@ -152,7 +152,7 @@ func (s *FlatFileStore) CommitExists(ctx context.Context, commitHash string) (bo
 	_, err := s.git(ctx, "cat-file", "-t", commitHash)
 	if err != nil {
 		// Missing object is the expected "no" answer; anything else
-		// (broken repo, missing git, cancelled context) is an error.
+		// (broken repo, missing git, canceled context) is an error.
 		if gitErrContains(err, "Not a valid object name", "could not get object info") {
 			return false, nil
 		}
