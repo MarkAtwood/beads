@@ -363,6 +363,109 @@ func TestSyncConflictPreservesUnmergedPaths(t *testing.T) {
 	}
 }
 
+// TASKS-34om: ResolveConflicts must handle modify/delete conflicts where the
+// CHOSEN side deleted the file (routine under delete cascades: issue deleted
+// on one branch, updated on the other). A blanket 'git checkout
+// --ours/--theirs .beads/' errors "does not have our/their version" exactly
+// then. Mixed merge: test-1 is modify/delete, test-2 is a content conflict —
+// both must resolve in one call and the merge must conclude.
+func TestResolveConflictsModifyDelete(t *testing.T) {
+	ctx := context.Background()
+
+	setup := func(t *testing.T, deleteOn string) (*FlatFileStore, string) {
+		s, dir := newGitStore(t, "main")
+		writeIssueFile(t, dir, "test-2", "initial 2")
+		gitRun(t, dir, "add", ".beads/issues/test-2.json")
+		gitRun(t, dir, "commit", "-q", "-m", "add test-2")
+
+		gitRun(t, dir, "checkout", "-q", "-b", "side")
+		if deleteOn == "side" {
+			gitRun(t, dir, "rm", "-q", ".beads/issues/test-1.json")
+		} else {
+			writeIssueFile(t, dir, "test-1", "side edit")
+		}
+		writeIssueFile(t, dir, "test-2", "side edit 2")
+		gitRun(t, dir, "commit", "-q", "-am", "side")
+
+		gitRun(t, dir, "checkout", "-q", "main")
+		if deleteOn == "main" {
+			gitRun(t, dir, "rm", "-q", ".beads/issues/test-1.json")
+		} else {
+			writeIssueFile(t, dir, "test-1", "main edit")
+		}
+		writeIssueFile(t, dir, "test-2", "main edit 2")
+		gitRun(t, dir, "commit", "-q", "-am", "main")
+
+		if _, err := gitTry(dir, "merge", "side"); err == nil {
+			t.Fatal("expected merge conflict")
+		}
+		return s, dir
+	}
+
+	// Direction 1: THEIRS deleted test-1, strategy "theirs" keeps the delete.
+	t.Run("theirs-deleted", func(t *testing.T) {
+		s, dir := setup(t, "side")
+		if err := s.ResolveConflicts(ctx, "", "theirs"); err != nil {
+			t.Fatalf("ResolveConflicts(theirs): %v", err)
+		}
+		if err := s.CommitMergeResolution(ctx, "resolve"); err != nil {
+			t.Fatalf("CommitMergeResolution: %v", err)
+		}
+		if _, err := gitTry(dir, "rev-parse", "-q", "--verify", "MERGE_HEAD"); err == nil {
+			t.Fatal("MERGE_HEAD still present: merge was not concluded")
+		}
+		if _, err := os.Stat(filepath.Join(dir, ".beads", "issues", "test-1.json")); !os.IsNotExist(err) {
+			t.Errorf("test-1.json should be deleted (theirs), stat err = %v", err)
+		}
+		data, err := os.ReadFile(filepath.Join(dir, ".beads", "issues", "test-2.json"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !strings.Contains(string(data), "side edit 2") || strings.Contains(string(data), "<<<<<<<") {
+			t.Errorf("content conflict not resolved to theirs: %q", string(data))
+		}
+	})
+
+	// Direction 2: OURS deleted test-1, strategy "ours" keeps the delete.
+	t.Run("ours-deleted", func(t *testing.T) {
+		s, dir := setup(t, "main")
+		if err := s.ResolveConflicts(ctx, "", "ours"); err != nil {
+			t.Fatalf("ResolveConflicts(ours): %v", err)
+		}
+		if err := s.CommitMergeResolution(ctx, "resolve"); err != nil {
+			t.Fatalf("CommitMergeResolution: %v", err)
+		}
+		if _, err := os.Stat(filepath.Join(dir, ".beads", "issues", "test-1.json")); !os.IsNotExist(err) {
+			t.Errorf("test-1.json should be deleted (ours), stat err = %v", err)
+		}
+		data, err := os.ReadFile(filepath.Join(dir, ".beads", "issues", "test-2.json"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !strings.Contains(string(data), "main edit 2") || strings.Contains(string(data), "<<<<<<<") {
+			t.Errorf("content conflict not resolved to ours: %q", string(data))
+		}
+	})
+
+	// Surviving side chosen: modify/delete resolved toward the modification.
+	t.Run("surviving-side-chosen", func(t *testing.T) {
+		s, dir := setup(t, "side")
+		if err := s.ResolveConflicts(ctx, "", "ours"); err != nil {
+			t.Fatalf("ResolveConflicts(ours): %v", err)
+		}
+		if err := s.CommitMergeResolution(ctx, "resolve"); err != nil {
+			t.Fatalf("CommitMergeResolution: %v", err)
+		}
+		data, err := os.ReadFile(filepath.Join(dir, ".beads", "issues", "test-1.json"))
+		if err != nil {
+			t.Fatalf("test-1.json should survive (ours modified): %v", err)
+		}
+		if !strings.Contains(string(data), "main edit") {
+			t.Errorf("test-1 not resolved to ours: %q", string(data))
+		}
+	})
+}
+
 // TASKS-i39o: Sync and SyncStatus must track the current branch (Dolt uses
 // peer/s.branch), not a hardcoded "main". Repo here uses "trunk".
 func TestSyncUsesCurrentBranch(t *testing.T) {

@@ -275,17 +275,73 @@ func (s *FlatFileStore) GetConflicts(ctx context.Context) ([]storage.Conflict, e
 	return conflicts, nil
 }
 
+// ResolveConflicts resolves every unmerged path under .beads/ toward the
+// chosen side. A blanket 'git checkout --ours/--theirs .beads/' fails on
+// modify/delete conflicts whenever the chosen side is the one that deleted
+// ("path ... does not have our/their version"), which the delete cascades
+// make routine; so the unmerged paths are enumerated with their index stages
+// (2 = ours, 3 = theirs) and each path is checked out where the chosen stage
+// exists and 'git rm'ed where the chosen side deleted. Checked-out entries
+// stay unmerged until CommitMergeResolution's 'git add' stages them.
 func (s *FlatFileStore) ResolveConflicts(ctx context.Context, _ string, strategy string) error {
+	var flag, keepStage string
 	switch strategy {
 	case "ours":
-		_, err := s.git(ctx, "checkout", "--ours", ".beads/")
-		return err
+		flag, keepStage = "--ours", "2"
 	case "theirs":
-		_, err := s.git(ctx, "checkout", "--theirs", ".beads/")
-		return err
+		flag, keepStage = "--theirs", "3"
 	default:
 		return fmt.Errorf("flatfile: unknown conflict strategy: %s", strategy)
 	}
+
+	out, err := s.git(ctx, "ls-files", "-u", "--", ".beads/")
+	if err != nil {
+		return err
+	}
+	if out == "" {
+		return nil
+	}
+	// Lines are "<mode> <sha> <stage>\t<path>"; a path repeats per stage.
+	seen := make(map[string]bool)
+	hasKeepStage := make(map[string]bool)
+	var paths []string
+	for _, line := range strings.Split(out, "\n") {
+		tab := strings.IndexByte(line, '\t')
+		if tab < 0 {
+			continue
+		}
+		fields := strings.Fields(line[:tab])
+		if len(fields) < 3 {
+			continue
+		}
+		path := line[tab+1:]
+		if !seen[path] {
+			seen[path] = true
+			paths = append(paths, path)
+		}
+		if fields[2] == keepStage {
+			hasKeepStage[path] = true
+		}
+	}
+	var keep, drop []string
+	for _, path := range paths {
+		if hasKeepStage[path] {
+			keep = append(keep, path)
+		} else {
+			drop = append(drop, path)
+		}
+	}
+	if len(keep) > 0 {
+		if _, err := s.git(ctx, append([]string{"checkout", flag, "--"}, keep...)...); err != nil {
+			return err
+		}
+	}
+	if len(drop) > 0 {
+		if _, err := s.git(ctx, append([]string{"rm", "-f", "-q", "--"}, drop...)...); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // ── HistoryViewer ────────────────────────────────────────────────────
