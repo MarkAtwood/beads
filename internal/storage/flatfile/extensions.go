@@ -257,10 +257,19 @@ func (s *FlatFileStore) SlotClear(_ context.Context, issueID, key, _ string) err
 	}
 	var meta map[string]interface{}
 	if err := json.Unmarshal(issue.Metadata, &meta); err != nil {
+		return fmt.Errorf("flatfile: parse issue metadata: %w", err)
+	}
+	// Mirror sqlkit.SlotClear: clearing an absent key is a no-op that must
+	// not rewrite the issue (and so must not bump updated_at).
+	if _, ok := meta[key]; !ok {
 		return nil
 	}
 	delete(meta, key)
-	issue.Metadata, _ = json.Marshal(meta)
+	raw, err := json.Marshal(meta)
+	if err != nil {
+		return fmt.Errorf("flatfile: marshal issue metadata: %w", err)
+	}
+	issue.Metadata = raw
 	issue.UpdatedAt = time.Now().UTC()
 	return s.writeIssue(issue)
 }
