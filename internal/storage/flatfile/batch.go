@@ -43,7 +43,7 @@ func (s *FlatFileStore) CreateIssuesWithFullOptions(ctx context.Context, issues 
 	}
 	// The whole plan-then-write batch runs under writeMu so the validated
 	// in-memory plan cannot be invalidated by a concurrent mutation. No
-	// callee below takes writeMu (ImportIssueComment writes comment files
+	// callee below takes writeMu (ImportComment writes comment files
 	// only, and events are append-only).
 	s.writeMu.Lock()
 	defer s.writeMu.Unlock()
@@ -216,13 +216,29 @@ func (s *FlatFileStore) CreateIssuesWithFullOptions(ctx context.Context, issues 
 				return err
 			}
 		}
-		for _, comment := range plan.incoming.Comments {
-			createdAt := comment.CreatedAt
-			if createdAt.IsZero() {
-				createdAt = time.Now().UTC()
-			}
-			if _, err := s.ImportIssueComment(ctx, plan.final.ID, comment.Author, comment.Text, createdAt); err != nil {
+		// Comments: mirror issueops.PersistComments — skip a comment identical
+		// to an existing one (author, created_at, text: re-import dedup),
+		// preserve the incoming comment ID, and mint one only when absent.
+		if len(plan.incoming.Comments) > 0 {
+			existing, err := s.GetIssueComments(ctx, plan.final.ID)
+			if err != nil {
 				return err
+			}
+			for _, comment := range plan.incoming.Comments {
+				createdAt := comment.CreatedAt
+				if createdAt.IsZero() {
+					createdAt = time.Now().UTC()
+				}
+				if hasIdenticalComment(existing, comment.Author, comment.Text, createdAt) {
+					continue
+				}
+				c := *comment
+				c.IssueID = plan.final.ID
+				c.CreatedAt = createdAt
+				if err := s.ImportComment(ctx, &c); err != nil {
+					return err
+				}
+				existing = append(existing, &c)
 			}
 		}
 	}
@@ -238,6 +254,18 @@ func (s *FlatFileStore) CreateIssuesWithFullOptions(ctx context.Context, issues 
 		}
 	}
 	return nil
+}
+
+// hasIdenticalComment mirrors the duplicate check in issueops.PersistComments:
+// a comment matching an existing one's author, text, and created_at is a
+// re-import and must not be written twice.
+func hasIdenticalComment(existing []*types.Comment, author, text string, createdAt time.Time) bool {
+	for _, e := range existing {
+		if e.Author == author && e.Text == text && e.CreatedAt.Equal(createdAt) {
+			return true
+		}
+	}
+	return false
 }
 
 // CreateIssues creates multiple issues with default batch options
