@@ -12,6 +12,7 @@ import (
 	"github.com/steveyegge/beads/internal/beads"
 	"github.com/steveyegge/beads/internal/configfile"
 	"github.com/steveyegge/beads/internal/storage/dolt"
+	"github.com/steveyegge/beads/internal/storage/embeddeddolt"
 	"github.com/steveyegge/beads/internal/storage/flatfile"
 	"github.com/steveyegge/beads/internal/types"
 )
@@ -296,37 +297,15 @@ func runFlatfileReverseMigration(beadsDir string, dryRun bool) error {
 		}
 	}
 
-	// Flip metadata.json to the Dolt backend before opening the store —
-	// newDoltStoreFromConfig routes on it. Keep the original bytes so any
-	// failure below restores the workspace to flat-file untouched.
-	metaPath := filepath.Join(beadsDir, "metadata.json")
-	origMeta, err := os.ReadFile(metaPath)
+	// Open the embedded Dolt destination directly instead of routing through
+	// metadata.json (newDoltStoreFromConfig), so the backend flip can happen
+	// AFTER the import succeeds. Flipping first left a crash window: a
+	// SIGKILL mid-import stranded metadata.json on backend=dolt over zero or
+	// partial rows, with the intact flat-file data no longer routed to and
+	// the --reverse re-run refused by the IsFlatFileBackend guard.
+	dbName = sanitizeDBName(dbName)
+	dst, err := embeddeddolt.Open(ctx, beadsDir, dbName, "main")
 	if err != nil {
-		return HandleError("failed to read metadata.json: %v", err)
-	}
-	var meta map[string]interface{}
-	if err := json.Unmarshal(origMeta, &meta); err != nil {
-		meta = make(map[string]interface{})
-	}
-	meta["backend"] = configfile.BackendDolt
-	meta["dolt_database"] = dbName
-	newMeta, err := json.MarshalIndent(meta, "", "  ")
-	if err != nil {
-		return HandleError("failed to encode metadata.json: %v", err)
-	}
-	newMeta = append(newMeta, '\n')
-	if err := os.WriteFile(metaPath, newMeta, 0o644); err != nil {
-		return HandleError("failed to update metadata.json: %v", err)
-	}
-	restoreMeta := func() {
-		if err := os.WriteFile(metaPath, origMeta, 0o644); err != nil {
-			fmt.Fprintf(os.Stderr, "Warning: failed to restore metadata.json: %v\n", err)
-		}
-	}
-
-	dst, err := newDoltStoreFromConfig(ctx, beadsDir)
-	if err != nil {
-		restoreMeta()
 		return HandleError("failed to open Dolt store: %v", err)
 	}
 
@@ -338,8 +317,7 @@ func runFlatfileReverseMigration(beadsDir string, dryRun bool) error {
 	})
 	if err != nil {
 		_ = dst.Close()
-		restoreMeta()
-		return HandleError("failed to import issues into Dolt: %v", err)
+		return HandleError("failed to import issues into Dolt: %v\nThe workspace still routes to flat-file; fix the cause and re-run 'bd migrate flatfile --reverse'.", err)
 	}
 	for _, skipped := range result.SkippedDependencies {
 		fmt.Fprintf(os.Stderr, "Warning: skipped dependency %s\n", skipped)
@@ -357,6 +335,30 @@ func runFlatfileReverseMigration(beadsDir string, dryRun bool) error {
 
 	if err := dst.Close(); err != nil {
 		fmt.Fprintf(os.Stderr, "Warning: failed to close Dolt store: %v\n", err)
+	}
+
+	// All data is in Dolt; only now flip metadata.json to the Dolt backend.
+	// Until this write lands the workspace keeps routing to flat-file, so a
+	// crash anywhere above leaves it intact and the migration re-runnable
+	// (importIssuesCore upserts, so a re-run over partial rows is safe).
+	metaPath := filepath.Join(beadsDir, "metadata.json")
+	metaData, err := os.ReadFile(metaPath)
+	if err != nil {
+		return HandleError("data imported into Dolt, but failed to read metadata.json: %v\nThe workspace still routes to flat-file; fix the cause and re-run 'bd migrate flatfile --reverse'.", err)
+	}
+	var meta map[string]interface{}
+	if err := json.Unmarshal(metaData, &meta); err != nil {
+		meta = make(map[string]interface{})
+	}
+	meta["backend"] = configfile.BackendDolt
+	meta["dolt_database"] = dbName
+	newMeta, err := json.MarshalIndent(meta, "", "  ")
+	if err != nil {
+		return HandleError("failed to encode metadata.json: %v", err)
+	}
+	newMeta = append(newMeta, '\n')
+	if err := os.WriteFile(metaPath, newMeta, 0o644); err != nil {
+		return HandleError("data imported into Dolt, but failed to update metadata.json: %v\nThe workspace still routes to flat-file; fix the cause and re-run 'bd migrate flatfile --reverse'.", err)
 	}
 
 	// Restore the Dolt-backend .gitignore (the flat-file one stopped ignoring
