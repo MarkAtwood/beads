@@ -59,9 +59,24 @@ func OpenStore(_ context.Context, beadsDir string) (storage.DoltStorage, error) 
 	return NewFlatFileStore(abs)
 }
 
+// InGitRepo reports whether the directory containing beadsDir is inside a
+// git work tree. The flat-file backend syncs through git; without a repo,
+// issues exist only on the local machine. Returns false when git is not
+// installed.
+func InGitRepo(beadsDir string) bool {
+	cmd := exec.CommandContext(context.Background(), "git", "rev-parse", "--is-inside-work-tree")
+	cmd.Dir = filepath.Dir(beadsDir)
+	out, err := cmd.Output()
+	return err == nil && strings.TrimSpace(string(out)) == "true"
+}
+
 // CheckGitignored returns a non-empty warning message if the .beads/issues/
 // directory would be ignored by git. The flat-file backend requires git
 // tracking for sync — if issues are gitignored, push/pull won't work.
+// Callers must establish that a git repo exists (InGitRepo) before treating
+// an empty return as "tracked": 'git check-ignore' exits non-zero both for
+// "not ignored" (exit 1) and "not a repo" (exit 128), and this function
+// reports "" for both.
 func CheckGitignored(beadsDir string) string {
 	issuesDir := filepath.Join(beadsDir, "issues")
 	repoRoot := filepath.Dir(beadsDir)

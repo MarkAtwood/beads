@@ -307,6 +307,18 @@ func checkFlatfileCounter(beadsDir string) DoctorCheck {
 }
 
 func checkFlatfileGitTracking(beadsDir string) DoctorCheck {
+	// CheckGitignored returns "" both for "not ignored" and "no git repo";
+	// establish the repo exists first, otherwise a workspace with no repo at
+	// all would get a false "tracked by git" all-clear (TASKS-4gnf).
+	if !flatfile.InGitRepo(beadsDir) {
+		return DoctorCheck{
+			Name:     "Git Tracking",
+			Status:   StatusWarning,
+			Message:  "not inside a git repository — flat-file sync (push/pull) has no git repo to work through; issues exist only on this machine",
+			Fix:      "Run 'git init' (or move the workspace into a git repo) so .beads/issues/ can be tracked",
+			Category: CategoryGit,
+		}
+	}
 	warning := flatfile.CheckGitignored(beadsDir)
 	if warning != "" {
 		return DoctorCheck{
