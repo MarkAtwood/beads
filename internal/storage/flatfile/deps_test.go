@@ -235,6 +235,110 @@ func TestGetDependencyTree(t *testing.T) {
 	}
 }
 
+// TestComputeBlockedSetWaitsForGate pins the waits-for branch of the SQL
+// is_blocked projection (issueops waitsForGateBlockedSQL): a waiter with a
+// waits-for edge is blocked while the spawner target has any active
+// parent-child child; an any-children gate is satisfied by a closed
+// (specifically closed, not pinned) child.
+func TestComputeBlockedSetWaitsForGate(t *testing.T) {
+	mk := func(id string, st types.Status, deps ...*types.Dependency) *types.Issue {
+		return &types.Issue{ID: id, Title: id, Status: st, Dependencies: deps}
+	}
+	waits := func(target, metadata string) *types.Dependency {
+		return &types.Dependency{IssueID: "w-1", DependsOnID: target, Type: types.DepWaitsFor, Metadata: metadata}
+	}
+	child := func(id string, st types.Status, parent string) *types.Issue {
+		return mk(id, st, &types.Dependency{IssueID: id, DependsOnID: parent, Type: types.DepParentChild})
+	}
+
+	cases := []struct {
+		name    string
+		issues  []*types.Issue
+		blocked bool
+	}{
+		{"active child blocks waiter", []*types.Issue{
+			mk("w-1", types.StatusOpen, waits("s-1", "")),
+			mk("s-1", types.StatusOpen),
+			child("c-1", types.StatusOpen, "s-1"),
+		}, true},
+		{"all children closed unblocks", []*types.Issue{
+			mk("w-1", types.StatusOpen, waits("s-1", "")),
+			mk("s-1", types.StatusOpen),
+			child("c-1", types.StatusClosed, "s-1"),
+		}, false},
+		{"all-children gate stays blocked with one closed one open", []*types.Issue{
+			mk("w-1", types.StatusOpen, waits("s-1", "")),
+			mk("s-1", types.StatusOpen),
+			child("c-1", types.StatusClosed, "s-1"),
+			child("c-2", types.StatusOpen, "s-1"),
+		}, true},
+		{"any-children gate satisfied by one closed child", []*types.Issue{
+			mk("w-1", types.StatusOpen, waits("s-1", `{"gate":"any-children"}`)),
+			mk("s-1", types.StatusOpen),
+			child("c-1", types.StatusClosed, "s-1"),
+			child("c-2", types.StatusOpen, "s-1"),
+		}, false},
+		{"any-children gate not satisfied by pinned child", []*types.Issue{
+			mk("w-1", types.StatusOpen, waits("s-1", `{"gate":"any-children"}`)),
+			mk("s-1", types.StatusOpen),
+			child("c-1", types.StatusPinned, "s-1"),
+			child("c-2", types.StatusOpen, "s-1"),
+		}, true},
+		{"no children means not blocked", []*types.Issue{
+			mk("w-1", types.StatusOpen, waits("s-1", "")),
+			mk("s-1", types.StatusOpen),
+		}, false},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := computeBlockedSet(tc.issues)["w-1"]
+			if got != tc.blocked {
+				t.Errorf("blocked[w-1] = %v, want %v", got, tc.blocked)
+			}
+		})
+	}
+}
+
+// TestGetReadyWorkWaitsForGate checks the store-level wiring: a fanout waiter
+// is excluded from ready work while its spawner has open children (matching
+// Dolt/SQL, where is_blocked=1 keeps it out of bd ready) and returns once
+// they close.
+func TestGetReadyWorkWaitsForGate(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+
+	s.CreateIssue(ctx, &types.Issue{ID: "g-spawn", Title: "Spawner"}, "tester")
+	s.CreateIssue(ctx, &types.Issue{ID: "g-wait", Title: "Waiter"}, "tester")
+	s.CreateIssue(ctx, &types.Issue{ID: "g-child", Title: "Child"}, "tester")
+	s.AddDependency(ctx, &types.Dependency{IssueID: "g-wait", DependsOnID: "g-spawn", Type: types.DepWaitsFor}, "tester")
+	s.AddDependency(ctx, &types.Dependency{IssueID: "g-child", DependsOnID: "g-spawn", Type: types.DepParentChild}, "tester")
+
+	inReady := func() bool {
+		t.Helper()
+		ready, err := s.GetReadyWork(ctx, types.WorkFilter{})
+		if err != nil {
+			t.Fatalf("GetReadyWork: %v", err)
+		}
+		for _, issue := range ready {
+			if issue.ID == "g-wait" {
+				return true
+			}
+		}
+		return false
+	}
+
+	if inReady() {
+		t.Error("waiter in ready work while spawner has an open child; want excluded")
+	}
+	if err := s.CloseIssue(ctx, "g-child", "done", "tester", ""); err != nil {
+		t.Fatalf("CloseIssue: %v", err)
+	}
+	if !inReady() {
+		t.Error("waiter not in ready work after all children closed; want included")
+	}
+}
+
 func TestGetDependencyTreeMissingRoot(t *testing.T) {
 	s := newTestStore(t)
 	ctx := context.Background()
