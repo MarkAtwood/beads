@@ -261,21 +261,29 @@ Non-interactive mode (--non-interactive or BD_NON_INTERACTIVE=1):
 		if backendFlag != "" && backendFlag != configfile.BackendDolt && !isPostgres && !isMySQL && !isSQLite && !isFlatfile {
 			return fmt.Errorf("unknown backend %q: supported backends are \"dolt\" (default), \"postgres\", \"mysql\", \"sqlite\", and \"flatfile\"", backendFlag)
 		}
-		if isPostgres || isMySQL || isSQLite {
-			// A non-Dolt SQL backend is a plain local workspace: only a small set of
+		if isPostgres || isMySQL || isSQLite || isFlatfile {
+			// A non-Dolt backend is a plain local workspace: only a small set of
 			// init-local flags apply. Reject any other init-local flag by ALLOWLIST — a
 			// denylist silently ignores Dolt-only flags added later, the exact footgun
 			// this block exists to prevent. Inherited/global flags (--json, --dir, …)
 			// are not init-local and are left untouched.
-			pgAllowedFlags := map[string]bool{
+			allowedFlags := map[string]bool{
 				"backend": true,
-				"pg-url":  true, "pg-schema": true,
-				"mysql-url": true, "mysql-database": true,
-				"sqlite-path": true,
-				"prefix":      true, "quiet": true,
+				"prefix":  true, "quiet": true,
 				"skip-hooks": true, "skip-agents": true,
 				"reinit-local": true, "force": true, "init-if-missing": true,
 				"non-interactive": true,
+			}
+			if isFlatfile {
+				// runInitFlatfile honors stealth mode; the SQL connection
+				// flags below do not apply to the flat-file backend.
+				allowedFlags["stealth"] = true
+			} else {
+				allowedFlags["pg-url"] = true
+				allowedFlags["pg-schema"] = true
+				allowedFlags["mysql-url"] = true
+				allowedFlags["mysql-database"] = true
+				allowedFlags["sqlite-path"] = true
 			}
 			var rejected []string
 			cmd.Flags().Visit(func(f *pflag.Flag) {
@@ -285,13 +293,17 @@ Non-interactive mode (--non-interactive or BD_NON_INTERACTIVE=1):
 				if cmd.InheritedFlags().Lookup(f.Name) != nil {
 					return
 				}
-				if !pgAllowedFlags[f.Name] {
+				if !allowedFlags[f.Name] {
 					rejected = append(rejected, "--"+f.Name)
 				}
 			})
 			if len(rejected) > 0 {
 				sort.Strings(rejected)
-				return fmt.Errorf("bd init --backend=%s does not support %s (a non-Dolt SQL backend is a plain local workspace: no Dolt server, sync, remote, or wizard)", backendFlag, strings.Join(rejected, ", "))
+				desc := "a non-Dolt SQL backend is a plain local workspace: no Dolt server, sync, remote, or wizard"
+				if isFlatfile {
+					desc = "the flat-file backend is a plain local workspace: no Dolt server, Dolt sync/remote, or wizard"
+				}
+				return fmt.Errorf("bd init --backend=%s does not support %s (%s)", backendFlag, strings.Join(rejected, ", "), desc)
 			}
 		}
 

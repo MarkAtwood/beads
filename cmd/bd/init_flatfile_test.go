@@ -3,6 +3,7 @@ package main
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -80,5 +81,46 @@ func TestInitFlatfileCreatesNoEmbeddedDoltArtifacts(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(beadsDir, "dolt")); !os.IsNotExist(err) {
 		t.Errorf("flatfile init created Dolt artifact .beads/dolt (stat err=%v)", err)
+	}
+}
+
+// TASKS-vqtt: Dolt-only init flags must be rejected on --backend=flatfile,
+// not silently ignored (the user asked for server mode / a named database
+// and would silently get neither).
+//
+// NOTE: this test must run AFTER any in-process test that inits with an
+// explicit non-Dolt --backend (tests run in source order within a file):
+// setting a flag via Execute adds it to pflag's `actual` set permanently —
+// there is no API to remove it — so the allowlist's Flags().Visit sees the
+// Dolt-only flags from this test in every later in-process
+// `init --backend=<non-dolt>` call, even though their values are reset.
+func TestInitFlatfileRejectsDoltOnlyFlags(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		flag string
+		args []string
+	}{
+		{"server", "--server", []string{"--server"}},
+		{"database", "--database", []string{"--database", "mydb"}},
+		{"shared-server", "--shared-server", []string{"--shared-server"}},
+		{"remote", "--remote", []string{"--remote", "https://example.com/x"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			flagNames := []string{"backend", "quiet"}
+			for _, a := range tc.args {
+				if len(a) > 2 && a[:2] == "--" {
+					flagNames = append(flagNames, a[2:])
+				}
+			}
+			resetInitFlags(t, flagNames...)
+
+			_, err := runInitCommand(t, append([]string{"--backend=flatfile", "--quiet"}, tc.args...)...)
+			if err == nil {
+				t.Fatalf("bd init --backend=flatfile %s succeeded; want rejection", tc.flag)
+			}
+			if !strings.Contains(err.Error(), tc.flag) {
+				t.Errorf("error %q does not name the rejected flag %s", err, tc.flag)
+			}
+		})
 	}
 }
