@@ -3,6 +3,7 @@ package flatfile
 import (
 	"context"
 	"sort"
+	"strings"
 	"time"
 
 	"github.com/steveyegge/beads/internal/storage/sqlbuild"
@@ -72,7 +73,9 @@ func (s *FlatFileStore) GetReadyWork(ctx context.Context, filter types.WorkFilte
 				continue
 			}
 		}
-		if descendants != nil && !descendants[issue.ID] {
+		// Explicit transitive descendants, plus the sqlbuild implicit-child
+		// fallback: a dotted-prefix ID with no parent-child dep at all.
+		if filter.ParentID != nil && !descendants[issue.ID] && !isImplicitDottedChild(issue, *filter.ParentID) {
 			continue
 		}
 		if !matchesBasicWorkFilter(issue, filter) {
@@ -124,6 +127,23 @@ func parentDescendants(all []*types.Issue, rootID string) map[string]bool {
 		}
 	}
 	return descendants
+}
+
+// isImplicitDottedChild reports whether issue is an implicit child of
+// parentID: its ID has the dotted parent prefix but it carries no explicit
+// parent-child dependency. Mirrors the sqlbuild ready-work parent clause
+// (id LIKE 'parent.%' AND id NOT IN parent-child issue_ids), which catches
+// dotted-ID children whose dependency row was never created or was lost.
+func isImplicitDottedChild(issue *types.Issue, parentID string) bool {
+	if !strings.HasPrefix(issue.ID, parentID+".") {
+		return false
+	}
+	for _, dep := range issue.Dependencies {
+		if dep.Type == types.DepParentChild {
+			return false
+		}
+	}
+	return true
 }
 
 // childrenOfDeferredParents returns IDs of issues whose parent has a future
@@ -384,11 +404,15 @@ func matchesWorkFilter(issue *types.Issue, f types.WorkFilter) bool {
 		}
 	}
 	if f.ParentID != nil {
-		found := false
-		for _, dep := range issue.Dependencies {
-			if dep.Type == types.DepParentChild && dep.DependsOnID == *f.ParentID {
-				found = true
-				break
+		// Mirrors issueops.GetBlockedIssuesInTx: direct parent-child children
+		// plus any dotted-prefix ID (strings.HasPrefix(id, parentID+".")).
+		found := strings.HasPrefix(issue.ID, *f.ParentID+".")
+		if !found {
+			for _, dep := range issue.Dependencies {
+				if dep.Type == types.DepParentChild && dep.DependsOnID == *f.ParentID {
+					found = true
+					break
+				}
 			}
 		}
 		if !found {

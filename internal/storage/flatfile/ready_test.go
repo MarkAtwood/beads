@@ -49,6 +49,66 @@ func TestGetReadyWorkMetadataFilters(t *testing.T) {
 	}
 }
 
+// SQL reference: the sqlbuild ready-work parent clause ORs the transitive
+// descendant set with "id LIKE 'parent.%' AND id NOT IN (parent-child
+// issue_ids)", so a dotted-ID child with no dependency row is still returned.
+func TestGetReadyWorkParentImplicitDottedChild(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+
+	s.CreateIssue(ctx, &types.Issue{ID: "pr-1", Title: "Parent", Status: types.StatusOpen}, "tester")
+	// Explicit child via parent-child dep.
+	s.CreateIssue(ctx, &types.Issue{ID: "pr-1.1", Title: "Explicit child", Status: types.StatusOpen}, "tester")
+	s.AddDependency(ctx, &types.Dependency{IssueID: "pr-1.1", DependsOnID: "pr-1", Type: types.DepParentChild}, "tester")
+	// Implicit child: dotted ID, no dep row.
+	s.CreateIssue(ctx, &types.Issue{ID: "pr-1.2", Title: "Implicit child", Status: types.StatusOpen}, "tester")
+	// Dotted ID but explicitly parented elsewhere: excluded by the SQL clause.
+	s.CreateIssue(ctx, &types.Issue{ID: "pr-1.3", Title: "Parented elsewhere", Status: types.StatusOpen}, "tester")
+	s.CreateIssue(ctx, &types.Issue{ID: "pr-9", Title: "Other parent", Status: types.StatusOpen}, "tester")
+	s.AddDependency(ctx, &types.Dependency{IssueID: "pr-1.3", DependsOnID: "pr-9", Type: types.DepParentChild}, "tester")
+
+	parent := "pr-1"
+	ready, err := s.GetReadyWork(ctx, types.WorkFilter{ParentID: &parent})
+	if err != nil {
+		t.Fatalf("GetReadyWork: %v", err)
+	}
+	got := make(map[string]bool)
+	for _, r := range ready {
+		got[r.ID] = true
+	}
+	if len(ready) != 2 || !got["pr-1.1"] || !got["pr-1.2"] {
+		t.Errorf("ready = %v, want [pr-1.1 pr-1.2]", readyIDs(ready))
+	}
+}
+
+// SQL reference: issueops.GetBlockedIssuesInTx matches direct parent-child
+// children OR strings.HasPrefix(id, parentID+".") for --parent filtering.
+func TestGetBlockedIssuesParentImplicitDottedChild(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+
+	s.CreateIssue(ctx, &types.Issue{ID: "bp-blk", Title: "Blocker", Status: types.StatusOpen}, "tester")
+	// Dotted-ID child of bp-1 with no parent-child dep, blocked by bp-blk.
+	s.CreateIssue(ctx, &types.Issue{ID: "bp-1.1", Title: "Implicit blocked child", Status: types.StatusOpen}, "tester")
+	s.AddDependency(ctx, &types.Dependency{IssueID: "bp-1.1", DependsOnID: "bp-blk", Type: types.DepBlocks}, "tester")
+	// Blocked issue outside the parent scope.
+	s.CreateIssue(ctx, &types.Issue{ID: "bp-other", Title: "Other blocked", Status: types.StatusOpen}, "tester")
+	s.AddDependency(ctx, &types.Dependency{IssueID: "bp-other", DependsOnID: "bp-blk", Type: types.DepBlocks}, "tester")
+
+	parent := "bp-1"
+	blocked, err := s.GetBlockedIssues(ctx, types.WorkFilter{ParentID: &parent})
+	if err != nil {
+		t.Fatalf("GetBlockedIssues: %v", err)
+	}
+	if len(blocked) != 1 || blocked[0].ID != "bp-1.1" {
+		ids := make([]string, len(blocked))
+		for i, b := range blocked {
+			ids[i] = b.ID
+		}
+		t.Errorf("blocked = %v, want [bp-1.1]", ids)
+	}
+}
+
 func readyIDs(issues []*types.Issue) []string {
 	ids := make([]string, len(issues))
 	for i, r := range issues {
