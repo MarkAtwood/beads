@@ -608,3 +608,30 @@ func TestCloseIssueDoesNotAssignActor(t *testing.T) {
 		t.Errorf("Assignee = %q, want empty (close must not assign the closer)", got.Assignee)
 	}
 }
+
+func TestCreateIssueWispIDPrefix(t *testing.T) {
+	s := newTestStore(t)
+
+	if err := s.SetConfig(ctx, "issue_prefix", "bd"); err != nil {
+		t.Fatalf("SetConfig: %v", err)
+	}
+
+	// SQL create (issueops.CreateIssueInTxWithResult) mints ConfigPrefix+"-wisp"
+	// for ephemeral issues with no explicit ID; flatfile must match.
+	wisp := &types.Issue{Title: "Ephemeral wisp", Ephemeral: true}
+	if err := s.CreateIssue(ctx, wisp, "tester"); err != nil {
+		t.Fatalf("CreateIssue: %v", err)
+	}
+	if !strings.HasPrefix(wisp.ID, "bd-wisp-") {
+		t.Errorf("wisp ID = %q, want prefix %q", wisp.ID, "bd-wisp-")
+	}
+
+	// Non-wisp issues keep the plain prefix.
+	plain := &types.Issue{Title: "Plain issue"}
+	if err := s.CreateIssue(ctx, plain, "tester"); err != nil {
+		t.Fatalf("CreateIssue: %v", err)
+	}
+	if strings.HasPrefix(plain.ID, "bd-wisp-") {
+		t.Errorf("plain ID = %q, must not carry -wisp segment", plain.ID)
+	}
+}
