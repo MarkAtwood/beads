@@ -99,12 +99,18 @@ func (s *FlatFileStore) CommitWithConfig(ctx context.Context, message string) er
 }
 
 // CommitMergeResolution concludes a merge whose conflicts were resolved with an
-// explicit strategy. Flat-file storage commits the whole .beads/ tree (config
-// files included) on every Commit, so a config-only resolution is never dropped
-// the way it is under Dolt's config-excluding Commit (GH#2455/#2474); delegating
-// to Commit is therefore already the "include config" semantics.
+// explicit strategy. Flat-file storage stages the whole .beads/ tree (config
+// files included), so a config-only resolution is never dropped the way it is
+// under Dolt's config-excluding Commit (GH#2455/#2474). Unlike Commit it must
+// NOT restrict the commit to a pathspec: git forbids a partial commit while
+// MERGE_HEAD exists ("cannot do a partial commit during a merge"), and only a
+// plain commit concludes the merge.
 func (s *FlatFileStore) CommitMergeResolution(ctx context.Context, message string) error {
-	return s.Commit(ctx, message)
+	if _, err := s.git(ctx, "add", ".beads/"); err != nil {
+		return err
+	}
+	_, err := s.git(ctx, "commit", "-m", message)
+	return err
 }
 
 func (s *FlatFileStore) CommitPending(ctx context.Context, _ string) (bool, error) {
