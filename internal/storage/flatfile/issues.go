@@ -31,9 +31,22 @@ func (s *FlatFileStore) safeIssueFilename(id string) (string, error) {
 	return safePath(s.issuesDir, id, ".json")
 }
 
-// generateID creates a hash-based issue ID, checking the filesystem for collisions.
-// Mirrors the algorithm in issueops.GenerateIssueIDInTable.
-func (s *FlatFileStore) generateID(prefix string, issue *types.Issue, actor string) (string, error) {
+// generateID creates an issue ID, checking the filesystem for collisions.
+// Mirrors issueops.GenerateIssueIDInTable: with issue_id_mode=counter
+// configured, durable issues get sequential IDs (counter mode never applies
+// to wisps, matching the SQL path's issues-table-only restriction);
+// otherwise IDs are hash-based.
+func (s *FlatFileStore) generateID(ctx context.Context, prefix string, issue *types.Issue, actor string) (string, error) {
+	if !issueops.IsWisp(issue) {
+		mode, err := s.GetConfig(ctx, "issue_id_mode")
+		if err != nil {
+			return "", fmt.Errorf("flatfile: read issue_id_mode config: %w", err)
+		}
+		if mode == "counter" {
+			return s.nextSequentialID(prefix)
+		}
+	}
+
 	const maxLength = 8
 	baseLength := 4
 
@@ -282,7 +295,7 @@ func (s *FlatFileStore) CreateIssue(ctx context.Context, issue *types.Issue, act
 		} else if issue.IDPrefix != "" {
 			prefix = prefix + "-" + issue.IDPrefix
 		}
-		id, err := s.generateID(prefix, issue, actor)
+		id, err := s.generateID(ctx, prefix, issue, actor)
 		if err != nil {
 			return err
 		}

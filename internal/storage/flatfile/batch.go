@@ -101,7 +101,7 @@ func (s *FlatFileStore) CreateIssuesWithFullOptions(ctx context.Context, issues 
 			} else if issueops.IsWisp(issue) {
 				prefix = prefix + "-wisp"
 			}
-			id, err := s.generateID(prefix, issue, actor)
+			id, err := s.generateID(ctx, prefix, issue, actor)
 			if err != nil {
 				return err
 			}
