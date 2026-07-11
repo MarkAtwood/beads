@@ -40,11 +40,17 @@ func checkFlatfileDirs(beadsDir string) DoctorCheck {
 		}
 	}
 	if len(missing) > 0 {
+		// Not an error: git does not track empty directories, so a fresh
+		// clone of a flatfile repo is always missing its empty subdirs
+		// (typically comments/, memories/). NewFlatFileStore recreates
+		// every missing dir on the next store open, so the workspace is
+		// healthy as-is — reporting StatusError here broke CI doctor
+		// gates on every clone and steered users toward a needless
+		// --force reinit.
 		return DoctorCheck{
 			Name:     "Flatfile Directories",
-			Status:   StatusError,
-			Message:  fmt.Sprintf("Missing directories: %s", strings.Join(missing, ", ")),
-			Fix:      "Run 'bd init --backend=flatfile --force' to recreate",
+			Status:   StatusOK,
+			Message:  fmt.Sprintf("Missing directories (auto-created on next store open): %s", strings.Join(missing, ", ")),
 			Category: CategoryCore,
 		}
 	}
