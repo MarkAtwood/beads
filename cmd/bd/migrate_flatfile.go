@@ -199,27 +199,18 @@ either migration can be retried, and can be removed afterwards.`,
 		}
 		fmt.Printf("Migrated %d config entries.\n", len(allConfig))
 
-		// Update metadata.json to flatfile backend.
-		metaPath := filepath.Join(beadsDir, "metadata.json")
-		metaData, _ := os.ReadFile(metaPath)
-		var meta map[string]interface{}
-		if err := json.Unmarshal(metaData, &meta); err != nil {
-			meta = make(map[string]interface{})
-		}
-		meta["backend"] = "flatfile"
-		delete(meta, "dolt_mode")
-		delete(meta, "dolt_database")
-		if meta["project_id"] == nil {
-			meta["project_id"] = configfile.GenerateProjectID()
-		}
-		newMeta, _ := json.MarshalIndent(meta, "", "  ")
-		newMeta = append(newMeta, '\n')
-		// atomicWriteFile (temp+rename): a plain os.WriteFile truncates in
-		// place, so a crash or a concurrent configfile.Load mid-write could
-		// observe an empty/partial metadata.json and break backend routing.
-		if err := atomicWriteFile(metaPath, newMeta); err != nil {
-			// Without the backend flip the migration did NOT complete; a
-			// warning here would print success while bd still routes to Dolt.
+		// Update metadata.json to flatfile backend. Read/parse failures abort
+		// (see mutateMetadataFile) — and without the backend flip the
+		// migration did NOT complete; a warning here would print success
+		// while bd still routes to Dolt.
+		if err := mutateMetadataFile(beadsDir, func(meta map[string]interface{}) {
+			meta["backend"] = "flatfile"
+			delete(meta, "dolt_mode")
+			delete(meta, "dolt_database")
+			if meta["project_id"] == nil {
+				meta["project_id"] = configfile.GenerateProjectID()
+			}
+		}); err != nil {
 			return abortMigration("failed to update metadata.json: %v", err)
 		}
 
@@ -241,6 +232,36 @@ either migration can be retried, and can be removed afterwards.`,
 		fmt.Printf("  rm -rf %s/dolt %s/embeddeddolt\n", beadsDir, beadsDir)
 		return nil
 	},
+}
+
+// mutateMetadataFile rewrites .beads/metadata.json via read → mutate →
+// atomic write. Read AND parse failures are fatal: rebuilding from an empty
+// map would silently mint a new project_id and drop every other key
+// (deletions_retention_days, global_dolt_database, ...) while the migration
+// prints success — a silent project-identity change. The caller decides how
+// to surface the error (the two migration directions leave the workspace
+// routed to different backends at this point).
+//
+// atomicWriteFile (temp+rename) on the write side: a plain os.WriteFile
+// truncates in place, so a crash or a concurrent configfile.Load mid-write
+// could observe an empty/partial metadata.json and break backend routing.
+func mutateMetadataFile(beadsDir string, mutate func(map[string]interface{})) error {
+	metaPath := filepath.Join(beadsDir, "metadata.json")
+	metaData, err := os.ReadFile(metaPath)
+	if err != nil {
+		return fmt.Errorf("failed to read metadata.json: %w", err)
+	}
+	var meta map[string]interface{}
+	if err := json.Unmarshal(metaData, &meta); err != nil {
+		return fmt.Errorf("metadata.json is not valid JSON (restore it from git or fix it by hand): %w", err)
+	}
+	mutate(meta)
+	newMeta, err := json.MarshalIndent(meta, "", "  ")
+	if err != nil {
+		return fmt.Errorf("failed to encode metadata.json: %w", err)
+	}
+	newMeta = append(newMeta, '\n')
+	return atomicWriteFile(metaPath, newMeta)
 }
 
 // copyAllConfig writes every source config KV entry into dst, failing on the
@@ -385,26 +406,10 @@ func runFlatfileReverseMigration(beadsDir string, dryRun bool) error {
 	// Until this write lands the workspace keeps routing to flat-file, so a
 	// crash anywhere above leaves it intact and the migration re-runnable
 	// (importIssuesCore upserts, so a re-run over partial rows is safe).
-	metaPath := filepath.Join(beadsDir, "metadata.json")
-	metaData, err := os.ReadFile(metaPath)
-	if err != nil {
-		return HandleError("data imported into Dolt, but failed to read metadata.json: %v\nThe workspace still routes to flat-file; fix the cause and re-run 'bd migrate flatfile --reverse'.", err)
-	}
-	var meta map[string]interface{}
-	if err := json.Unmarshal(metaData, &meta); err != nil {
-		meta = make(map[string]interface{})
-	}
-	meta["backend"] = configfile.BackendDolt
-	meta["dolt_database"] = dbName
-	newMeta, err := json.MarshalIndent(meta, "", "  ")
-	if err != nil {
-		return HandleError("failed to encode metadata.json: %v", err)
-	}
-	newMeta = append(newMeta, '\n')
-	// atomicWriteFile (temp+rename): a plain os.WriteFile truncates in place,
-	// so a crash or a concurrent configfile.Load mid-write could observe an
-	// empty/partial metadata.json and break backend routing.
-	if err := atomicWriteFile(metaPath, newMeta); err != nil {
+	if err := mutateMetadataFile(beadsDir, func(meta map[string]interface{}) {
+		meta["backend"] = configfile.BackendDolt
+		meta["dolt_database"] = dbName
+	}); err != nil {
 		return HandleError("data imported into Dolt, but failed to update metadata.json: %v\nThe workspace still routes to flat-file; fix the cause and re-run 'bd migrate flatfile --reverse'.", err)
 	}
 
