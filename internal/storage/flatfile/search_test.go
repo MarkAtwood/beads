@@ -430,3 +430,33 @@ func TestSearchIssuesWithCountsCommentDirUnreadable(t *testing.T) {
 		t.Error("SearchIssuesWithCounts with unreadable comments dir: want error, got nil")
 	}
 }
+
+// DependentCount must be computed over the whole store, not just the filtered
+// result set (guards the single-snapshot refactor of SearchIssuesWithCounts).
+func TestSearchIssuesWithCountsDependentsOutsideFilter(t *testing.T) {
+	s := newTestStore(t)
+	// d-2 (closed) blocks on d-1 (open): filtering to open excludes d-2 from
+	// the results but its dependency must still count toward d-1.
+	if err := s.CreateIssue(ctx, &types.Issue{ID: "d-1", Title: "dep target", Status: types.StatusOpen}, "tester"); err != nil {
+		t.Fatalf("CreateIssue: %v", err)
+	}
+	if err := s.CreateIssue(ctx, &types.Issue{ID: "d-2", Title: "dependent", Status: types.StatusClosed}, "tester"); err != nil {
+		t.Fatalf("CreateIssue: %v", err)
+	}
+	dep := &types.Dependency{IssueID: "d-2", DependsOnID: "d-1", Type: "blocks"}
+	if err := s.AddDependency(ctx, dep, "tester"); err != nil {
+		t.Fatalf("AddDependency: %v", err)
+	}
+
+	open := types.StatusOpen
+	got, err := s.SearchIssuesWithCounts(ctx, "", types.IssueFilter{Status: &open})
+	if err != nil {
+		t.Fatalf("SearchIssuesWithCounts: %v", err)
+	}
+	if len(got) != 1 || got[0].ID != "d-1" {
+		t.Fatalf("got %d issues, want [d-1]", len(got))
+	}
+	if got[0].DependentCount != 1 {
+		t.Errorf("DependentCount = %d, want 1 (dependent excluded by filter must still count)", got[0].DependentCount)
+	}
+}

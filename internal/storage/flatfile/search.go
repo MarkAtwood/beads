@@ -28,15 +28,22 @@ func (s *FlatFileStore) SearchIssues(_ context.Context, query string, filter typ
 	if err != nil {
 		return nil, err
 	}
+	return searchIn(all, query, filter)
+}
 
+// searchIn applies query, filter, sort, and offset/limit to a pre-loaded
+// snapshot, so callers that also need the full issue set (e.g. for dependent
+// counts) can share one load and see one consistent snapshot.
+func searchIn(all []*types.Issue, query string, filter types.IssueFilter) ([]*types.Issue, error) {
 	// Pre-compile label regex once for the entire search. An invalid regex
 	// or glob is an error, never a silent match-all / match-none.
 	var labelRe *regexp.Regexp
 	if filter.LabelRegex != "" {
-		labelRe, err = regexp.Compile(filter.LabelRegex)
+		re, err := regexp.Compile(filter.LabelRegex)
 		if err != nil {
 			return nil, fmt.Errorf("invalid label regex %q: %w", filter.LabelRegex, err)
 		}
+		labelRe = re
 	}
 	if filter.LabelPattern != "" {
 		if _, err := filepath.Match(filter.LabelPattern, ""); err != nil {
@@ -92,18 +99,25 @@ func (s *FlatFileStore) SearchIssueIDs(ctx context.Context, query string, filter
 	return ids, nil
 }
 
-// SearchIssuesWithCounts is like SearchIssues but attaches dependency and comment counts.
-func (s *FlatFileStore) SearchIssuesWithCounts(ctx context.Context, query string, filter types.IssueFilter) ([]*types.IssueWithCounts, error) {
-	issues, err := s.SearchIssues(ctx, query, filter)
-	if err != nil {
+// SearchIssuesWithCounts is like SearchIssues but attaches dependency and
+// comment counts. Issues are loaded once: the same snapshot backs both the
+// returned rows and the reverse-dependency index, so counts are always
+// consistent with the listed issues.
+func (s *FlatFileStore) SearchIssuesWithCounts(_ context.Context, query string, filter types.IssueFilter) ([]*types.IssueWithCounts, error) {
+	if err := s.checkClosed(); err != nil {
 		return nil, err
 	}
 
-	// Build reverse dep index for dependent counts.
 	all, err := s.loadAllIssues()
 	if err != nil {
 		return nil, err
 	}
+	issues, err := searchIn(all, query, filter)
+	if err != nil {
+		return nil, err
+	}
+
+	// Build reverse dep index for dependent counts from the same snapshot.
 	depCounts := make(map[string]int)
 	parentMap := make(map[string]string)
 	for _, a := range all {
