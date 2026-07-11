@@ -134,8 +134,9 @@ func (s *FlatFileStore) GetEvents(_ context.Context, issueID string, limit int) 
 		return nil, err
 	}
 
-	// Sort newest first.
-	sort.Slice(events, func(i, j int) bool {
+	// Sort newest first. Stable so same-timestamp events keep JSONL append
+	// order (true insertion order) instead of scrambling run-to-run.
+	sort.SliceStable(events, func(i, j int) bool {
 		return events[i].CreatedAt.After(events[j].CreatedAt)
 	})
 
@@ -180,7 +181,8 @@ func (s *FlatFileStore) GetAllEventsSince(_ context.Context, since time.Time) ([
 		}
 	}
 
-	sort.Slice(result, func(i, j int) bool {
+	// Stable: preserve per-file append order among equal timestamps.
+	sort.SliceStable(result, func(i, j int) bool {
 		return result[i].CreatedAt.Before(result[j].CreatedAt)
 	})
 	return result, nil

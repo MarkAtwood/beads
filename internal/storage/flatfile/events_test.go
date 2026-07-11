@@ -124,3 +124,57 @@ func TestGetAllEventsSinceSkipsStrayDotfiles(t *testing.T) {
 		t.Error("real issue's created event missing from scan")
 	}
 }
+
+// Audit-order semantics: JSONL append order is true insertion order, so
+// events sharing a CreatedAt (coarse clocks, created+label bursts) must come
+// back in insertion order deterministically, not scrambled by an unstable
+// sort.
+func TestEventOrderStableForEqualTimestamps(t *testing.T) {
+	s := newTestStore(t)
+
+	issue := &types.Issue{ID: "tie-1", Title: "Tie"}
+	if err := s.CreateIssue(ctx, issue, "tester"); err != nil {
+		t.Fatalf("CreateIssue: %v", err)
+	}
+
+	ts := time.Date(2026, 7, 10, 12, 0, 0, 0, time.UTC)
+	ids := []string{"ev-a", "ev-b", "ev-c", "ev-d", "ev-e", "ev-f", "ev-g", "ev-h"}
+	for _, id := range ids {
+		ev := &types.Event{ID: id, IssueID: "tie-1", EventType: types.EventUpdated, Actor: "tester", CreatedAt: ts}
+		if err := s.appendEvent(ev); err != nil {
+			t.Fatalf("appendEvent %s: %v", id, err)
+		}
+	}
+
+	events, err := s.GetEvents(ctx, "tie-1", 0)
+	if err != nil {
+		t.Fatalf("GetEvents: %v", err)
+	}
+	var gotDesc []string
+	for _, ev := range events {
+		if ev.CreatedAt.Equal(ts) {
+			gotDesc = append(gotDesc, ev.ID)
+		}
+	}
+	for i, id := range ids {
+		if i >= len(gotDesc) || gotDesc[i] != id {
+			t.Fatalf("GetEvents equal-timestamp order = %v, want insertion order %v", gotDesc, ids)
+		}
+	}
+
+	all, err := s.GetAllEventsSince(ctx, ts.Add(-time.Hour))
+	if err != nil {
+		t.Fatalf("GetAllEventsSince: %v", err)
+	}
+	var gotAsc []string
+	for _, ev := range all {
+		if ev.CreatedAt.Equal(ts) {
+			gotAsc = append(gotAsc, ev.ID)
+		}
+	}
+	for i, id := range ids {
+		if i >= len(gotAsc) || gotAsc[i] != id {
+			t.Fatalf("GetAllEventsSince equal-timestamp order = %v, want insertion order %v", gotAsc, ids)
+		}
+	}
+}
