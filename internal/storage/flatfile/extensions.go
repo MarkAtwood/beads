@@ -34,6 +34,8 @@ func (s *FlatFileStore) MergeSlotCreate(ctx context.Context, actor string) (*typ
 	if err := s.checkClosed(); err != nil {
 		return nil, err
 	}
+	s.writeMu.Lock()
+	defer s.writeMu.Unlock()
 	state := &mergeSlotState{SlotID: "merge-slot"}
 	if err := s.writeMergeSlot(state); err != nil {
 		return nil, err
@@ -61,6 +63,8 @@ func (s *FlatFileStore) MergeSlotAcquire(_ context.Context, holder, _ string, _ 
 	if err := s.checkClosed(); err != nil {
 		return nil, err
 	}
+	s.writeMu.Lock()
+	defer s.writeMu.Unlock()
 	state, err := s.readMergeSlot()
 	if err != nil {
 		return nil, err
@@ -82,6 +86,8 @@ func (s *FlatFileStore) MergeSlotRelease(_ context.Context, holder, _ string) er
 	if err := s.checkClosed(); err != nil {
 		return err
 	}
+	s.writeMu.Lock()
+	defer s.writeMu.Unlock()
 	state, err := s.readMergeSlot()
 	if err != nil {
 		return err
@@ -125,6 +131,8 @@ func (s *FlatFileStore) SlotSet(_ context.Context, issueID, key, value, _ string
 	if err := s.checkClosed(); err != nil {
 		return err
 	}
+	s.writeMu.Lock()
+	defer s.writeMu.Unlock()
 	issue, err := s.readIssue(issueID)
 	if err != nil {
 		return err
@@ -180,6 +188,8 @@ func (s *FlatFileStore) SlotClear(_ context.Context, issueID, key, _ string) err
 	if err := s.checkClosed(); err != nil {
 		return err
 	}
+	s.writeMu.Lock()
+	defer s.writeMu.Unlock()
 	issue, err := s.readIssue(issueID)
 	if err != nil {
 		return err
@@ -208,6 +218,8 @@ func (s *FlatFileStore) DeleteIssues(_ context.Context, ids []string, cascade bo
 	if err := s.checkClosed(); err != nil {
 		return nil, err
 	}
+	s.writeMu.Lock()
+	defer s.writeMu.Unlock()
 	if len(ids) == 0 {
 		return &types.DeleteIssuesResult{}, nil
 	}
@@ -426,6 +438,8 @@ func (s *FlatFileStore) DeleteIssuesBySourceRepo(_ context.Context, sourceRepo s
 	if err := s.checkClosed(); err != nil {
 		return 0, err
 	}
+	s.writeMu.Lock()
+	defer s.writeMu.Unlock()
 	all, err := s.loadAllIssues()
 	if err != nil {
 		return 0, err
@@ -461,6 +475,8 @@ func (s *FlatFileStore) UpdateIssueID(_ context.Context, oldID, newID string, is
 	if err := s.checkClosed(); err != nil {
 		return err
 	}
+	s.writeMu.Lock()
+	defer s.writeMu.Unlock()
 
 	stored, err := s.readIssue(oldID)
 	if err != nil {
@@ -549,6 +565,8 @@ func (s *FlatFileStore) ClaimIssue(ctx context.Context, id string, actor string)
 	if err := s.checkClosed(); err != nil {
 		return err
 	}
+	s.writeMu.Lock()
+	defer s.writeMu.Unlock()
 	issue, err := s.readIssue(id)
 	if err != nil {
 		return err
@@ -607,6 +625,8 @@ func (s *FlatFileStore) UnclaimIssue(_ context.Context, id string, _ string) err
 	if err := s.checkClosed(); err != nil {
 		return err
 	}
+	s.writeMu.Lock()
+	defer s.writeMu.Unlock()
 	issue, err := s.readIssue(id)
 	if err != nil {
 		return err
@@ -633,6 +653,8 @@ func (s *FlatFileStore) HeartbeatIssue(ctx context.Context, id, actor string) er
 	if err := s.checkClosed(); err != nil {
 		return err
 	}
+	s.writeMu.Lock()
+	defer s.writeMu.Unlock()
 	issue, err := s.readIssue(id)
 	if err != nil {
 		if errors.Is(err, storage.ErrNotFound) {
@@ -672,6 +694,8 @@ func (s *FlatFileStore) ReclaimExpiredLeases(_ context.Context, olderThan time.D
 	if err := s.checkClosed(); err != nil {
 		return nil, err
 	}
+	s.writeMu.Lock()
+	defer s.writeMu.Unlock()
 	cutoff := time.Now().UTC().Add(-olderThan)
 	all, err := s.loadAllIssues()
 	if err != nil {
@@ -711,6 +735,8 @@ func (s *FlatFileStore) PromoteFromEphemeral(_ context.Context, id string, _ str
 	if err := s.checkClosed(); err != nil {
 		return err
 	}
+	s.writeMu.Lock()
+	defer s.writeMu.Unlock()
 	issue, err := s.readIssue(id)
 	if err != nil {
 		return fmt.Errorf("flatfile: wisp %s not found: %w", id, err)
@@ -1545,6 +1571,8 @@ func (s *FlatFileStore) ApplyCompaction(_ context.Context, issueID string, tier 
 	if err := s.checkClosed(); err != nil {
 		return err
 	}
+	s.writeMu.Lock()
+	defer s.writeMu.Unlock()
 	issue, err := s.readIssue(issueID)
 	if err != nil {
 		return err

@@ -42,6 +42,22 @@ type FlatFileStore struct {
 	kvMu       sync.Mutex   // protects config/metadata KV read-modify-write
 	commentSeq atomic.Int64 // monotonic counter for comment IDs
 
+	// writeMu serializes every read-modify-write cycle on issue files and the
+	// merge-slot file: the whole read → mutate → writeIssue span of a mutation
+	// runs under it, so concurrent same-issue mutations in one process cannot
+	// lose updates (the SQL backends get this from transactions). It is a
+	// single store-wide mutex, not a per-issue striped lock, on purpose: bd is
+	// a single-process CLI where fsync dominates write cost, and multi-issue
+	// mutations (UpdateIssueID inbound-edge rewrite, DeleteIssues cascade,
+	// batch create, ReclaimExpiredLeases) would need ordered multi-lock
+	// acquisition under striping. Pure readers do not take it — writeIssue's
+	// atomic rename already guarantees they see a consistent file. Holders
+	// must not call another writeMu-taking method (the lock is not reentrant);
+	// wrappers like ReopenIssue/UpdateIssueType/ClaimReadyIssue therefore rely
+	// on their inner call for locking. Cross-process mutual exclusion is out
+	// of scope: the flat-file store assumes one writing process per checkout.
+	writeMu sync.Mutex
+
 	closed atomic.Bool
 }
 

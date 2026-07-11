@@ -41,6 +41,12 @@ func (s *FlatFileStore) CreateIssuesWithFullOptions(ctx context.Context, issues 
 	if len(issues) == 0 {
 		return nil
 	}
+	// The whole plan-then-write batch runs under writeMu so the validated
+	// in-memory plan cannot be invalidated by a concurrent mutation. No
+	// callee below takes writeMu (ImportIssueComment writes comment files
+	// only, and events are append-only).
+	s.writeMu.Lock()
+	defer s.writeMu.Unlock()
 
 	// All-wisp batches force Ephemeral (mirrors sqlkit).
 	if issueops.AllWisps(issues) {

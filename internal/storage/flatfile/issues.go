@@ -238,6 +238,8 @@ func (s *FlatFileStore) CreateIssue(ctx context.Context, issue *types.Issue, act
 	if err := s.checkClosed(); err != nil {
 		return err
 	}
+	s.writeMu.Lock()
+	defer s.writeMu.Unlock()
 
 	// Generate ID if not provided.
 	if issue.ID == "" {
@@ -344,6 +346,8 @@ func (s *FlatFileStore) UpdateIssue(ctx context.Context, id string, updates map[
 	if err := s.checkClosed(); err != nil {
 		return err
 	}
+	s.writeMu.Lock()
+	defer s.writeMu.Unlock()
 
 	issue, err := s.readIssue(id)
 	if err != nil {
@@ -461,6 +465,8 @@ func (s *FlatFileStore) CloseIssue(_ context.Context, id string, reason string, 
 	if err := s.checkClosed(); err != nil {
 		return err
 	}
+	s.writeMu.Lock()
+	defer s.writeMu.Unlock()
 
 	issue, err := s.readIssue(id)
 	if err != nil {
@@ -493,6 +499,8 @@ func (s *FlatFileStore) DeleteIssue(_ context.Context, id string) error {
 	if err := s.checkClosed(); err != nil {
 		return err
 	}
+	s.writeMu.Lock()
+	defer s.writeMu.Unlock()
 
 	path, err := s.safeIssueFilename(id)
 	if err != nil {
