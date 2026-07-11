@@ -339,6 +339,52 @@ func TestCountIssuesByGroupUnsupportedErrors(t *testing.T) {
 	}
 }
 
+// LIKE-wildcard characters in text queries and *Contains/IDPrefix filters
+// have no special meaning: matching is literal. This is the canonical
+// contract; SQL backends conform by LIKE-escaping needles
+// (sqlbuild.EscapeLikePattern + ESCAPE clause).
+func TestSearchIssuesWildcardNeedlesLiteral(t *testing.T) {
+	s := newTestStore(t)
+	seed := []*types.Issue{
+		{ID: "w-1", Title: "release 10_ branch"},
+		{ID: "w-2", Title: "release 105 branch"},
+		{ID: "w-3", Title: "100% done"},
+		{ID: "w-4", Title: "1005 done"},
+	}
+	for _, is := range seed {
+		if err := s.CreateIssue(ctx, is, "tester"); err != nil {
+			t.Fatalf("CreateIssue(%s): %v", is.ID, err)
+		}
+	}
+
+	// Free-text query: "_" is not a single-character wildcard.
+	got, err := s.SearchIssues(ctx, "10_", types.IssueFilter{})
+	if err != nil {
+		t.Fatalf("SearchIssues(10_): %v", err)
+	}
+	if len(got) != 1 || got[0].ID != "w-1" {
+		t.Errorf("query 10_ matched %d issues, want only w-1", len(got))
+	}
+
+	// TitleContains: "%" is not a multi-character wildcard.
+	got, err = s.SearchIssues(ctx, "", types.IssueFilter{TitleContains: "100%"})
+	if err != nil {
+		t.Fatalf("SearchIssues(TitleContains 100%%): %v", err)
+	}
+	if len(got) != 1 || got[0].ID != "w-3" {
+		t.Errorf("TitleContains 100%% matched %d issues, want only w-3", len(got))
+	}
+
+	// IDPrefix: literal prefix, no wildcards.
+	got, err = s.SearchIssues(ctx, "", types.IssueFilter{IDPrefix: "w_"})
+	if err != nil {
+		t.Fatalf("SearchIssues(IDPrefix w_): %v", err)
+	}
+	if len(got) != 0 {
+		t.Errorf("IDPrefix w_ matched %d issues, want 0", len(got))
+	}
+}
+
 // SQL parity (sqlbuild.AppendMetadataClauses): metadata filters compare
 // JSON_UNQUOTE(JSON_EXTRACT(...)) text — JSON source text for non-string
 // scalars, unquoted contents for strings, MySQL's spaced serialization for
