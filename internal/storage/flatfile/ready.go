@@ -27,6 +27,13 @@ func (s *FlatFileStore) GetReadyWork(ctx context.Context, filter types.WorkFilte
 		return nil, err
 	}
 
+	return readyWorkFromSnapshot(all, filter), nil
+}
+
+// readyWorkFromSnapshot computes the ready set over one preloaded issue
+// snapshot, so callers needing extra projections (counts) can reuse the same
+// snapshot instead of re-reading the store.
+func readyWorkFromSnapshot(all []*types.Issue, filter types.WorkFilter) []*types.Issue {
 	blocked := computeBlockedSet(all)
 
 	excludeTypes := make(map[types.IssueType]bool)
@@ -108,13 +115,13 @@ func (s *FlatFileStore) GetReadyWork(ctx context.Context, filter types.WorkFilte
 	if filter.Offset > 0 && filter.Offset < len(result) {
 		result = result[filter.Offset:]
 	} else if filter.Offset > 0 && filter.Offset >= len(result) {
-		return nil, nil
+		return nil
 	}
 	if filter.Limit > 0 && len(result) > filter.Limit {
 		result = result[:filter.Limit]
 	}
 
-	return result, nil
+	return result
 }
 
 // parentDescendants returns the set of transitive parent-child descendants of
@@ -200,15 +207,17 @@ func childrenOfDeferredParents(all []*types.Issue) map[string]bool {
 // GetReadyWorkWithCounts is GetReadyWork plus dependency/comment counts.
 // Counts are blocks-only, mirroring the ready-with-counts SQL projection.
 func (s *FlatFileStore) GetReadyWorkWithCounts(ctx context.Context, filter types.WorkFilter) ([]*types.IssueWithCounts, error) {
-	issues, err := s.GetReadyWork(ctx, filter)
-	if err != nil {
+	if err := s.checkClosed(); err != nil {
 		return nil, err
 	}
 
+	// One snapshot feeds both the ready set and the counts, so a concurrent
+	// write cannot skew DependentCount/Parent against the issues returned.
 	all, err := s.loadAllIssues()
 	if err != nil {
 		return nil, err
 	}
+	issues := readyWorkFromSnapshot(all, filter)
 
 	dependentCounts := make(map[string]int)
 	parentMap := make(map[string]string)
