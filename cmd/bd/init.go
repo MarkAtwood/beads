@@ -349,6 +349,33 @@ Non-interactive mode (--non-interactive or BD_NON_INTERACTIVE=1):
 			backend = configfile.BackendDolt
 		}
 
+		// Explicit Dolt server intent must not silently degrade to a
+		// flat-file workspace: the backend defaults to flatfile, so `bd init
+		// --server` (or --database, …) without --backend=dolt used to
+		// validate the flag, create a stray .beads/dolt/ marker dir, then
+		// dispatch to runInitFlatfile with the server intent discarded
+		// entirely (TASKS-luzu). Refuse instead of silently picking a
+		// backend the caller did not ask for. --remote is deliberately NOT
+		// in this list: remote bootstrap intent must keep routing through
+		// the CheckRemoteSafety chokepoint below (ADR 0002), which owns the
+		// divergence refusals; the flatfile arm at the clone site handles
+		// it. Env-var leftovers (BEADS_DOLT_SERVER_MODE /
+		// BEADS_DOLT_SHARED_SERVER) intentionally do NOT count as intent —
+		// only explicit flags do (TASKS-9tsg). Explicit --backend=flatfile
+		// is handled by the allowlist above, so this only fires for the
+		// defaulted backend.
+		if backend == configfile.BackendFlatfile {
+			var doltIntent []string
+			for _, name := range []string{"server", "shared-server", "external", "database", "server-host", "server-port", "server-socket", "server-user"} {
+				if cmd.Flags().Changed(name) {
+					doltIntent = append(doltIntent, "--"+name)
+				}
+			}
+			if len(doltIntent) > 0 {
+				return fmt.Errorf("%s requires --backend=dolt: the default flat-file backend is a plain local workspace with no Dolt server", strings.Join(doltIntent, ", "))
+			}
+		}
+
 		// Also treat BEADS_DOLT_SERVER_MODE=1 env var as --server.
 		if os.Getenv("BEADS_DOLT_SERVER_MODE") == "1" {
 			initServerMode = true
@@ -834,7 +861,11 @@ Non-interactive mode (--non-interactive or BD_NON_INTERACTIVE=1):
 		// so we create the marker directory explicitly.
 		// In embedded mode the engine creates its own directories under .beads/embeddeddolt/,
 		// so skip this to avoid leaving an empty .beads/dolt/ artifact (GH#2903).
-		if initServerMode {
+		// Skip for the flat-file backend too: an explicit --server already
+		// errored above, so serverMode here can only be an env-var leftover,
+		// which must not leave a stray Dolt marker dir in a flat-file
+		// workspace (TASKS-luzu).
+		if initServerMode && backend != configfile.BackendFlatfile {
 			if err := os.MkdirAll(initDBPath, config.BeadsDirPerm); err != nil {
 				return fmt.Errorf("failed to create storage directory %s: %v", initDBPath, err)
 			}
