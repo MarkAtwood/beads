@@ -34,6 +34,14 @@ func makeFlatfileWorkspace(t *testing.T, root string, issueFiles map[string]stri
 // the corruption.
 func TestDoctorFlatfilePathArgTargetsThatWorkspace(t *testing.T) {
 	os.Unsetenv("BEADS_DIR")
+	// Executing doctor with a path arg rebinds BEADS_DIR process-wide
+	// (prepareSelectedCommandContext never restores it — fine for the real
+	// CLI, which exits). Without this cleanup the temp workspace path leaks
+	// into every later test in the package: t.Setenv snapshots in
+	// unrelated tests re-propagate it, and exec'd bd children inherit it
+	// and silently initialize the leaked (deleted) workspace instead of
+	// their own.
+	t.Cleanup(func() { os.Unsetenv("BEADS_DIR") })
 
 	healthy := makeFlatfileWorkspace(t, t.TempDir(), map[string]string{
 		"ok-1.json": `{"id":"ok-1","title":"fine","status":"open"}`,
