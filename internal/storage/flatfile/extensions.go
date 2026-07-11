@@ -30,24 +30,50 @@ type mergeSlotState struct {
 	Waiters []string `json:"waiters"`
 }
 
+// mergeSlotID mirrors storage.MergeSlotID: "<issue_prefix>-merge-slot",
+// falling back to "bd-merge-slot" when the prefix is not configured.
+func (s *FlatFileStore) mergeSlotID(ctx context.Context) string {
+	prefix := "bd"
+	if p, err := s.GetConfig(ctx, "issue_prefix"); err == nil && p != "" {
+		prefix = strings.TrimSuffix(p, "-")
+	}
+	return prefix + "-merge-slot"
+}
+
 func (s *FlatFileStore) MergeSlotCreate(ctx context.Context, actor string) (*types.Issue, error) {
 	if err := s.checkClosed(); err != nil {
 		return nil, err
 	}
 	s.writeMu.Lock()
 	defer s.writeMu.Unlock()
-	state := &mergeSlotState{SlotID: "merge-slot"}
+	slotID := s.mergeSlotID(ctx)
+	// Idempotent, mirroring storage.MergeSlotCreateImpl: an existing slot is
+	// returned untouched so a re-run never wipes the current holder/waiters.
+	state, err := s.readMergeSlot(slotID)
+	switch {
+	case err == nil:
+		return mergeSlotIssue(state), nil
+	case !errors.Is(err, storage.ErrNotFound):
+		return nil, err
+	}
+	state = &mergeSlotState{SlotID: slotID}
 	if err := s.writeMergeSlot(state); err != nil {
 		return nil, err
 	}
-	return &types.Issue{ID: "merge-slot", Title: "Merge Slot", IssueType: "slot"}, nil
+	return mergeSlotIssue(state), nil
 }
 
-func (s *FlatFileStore) MergeSlotCheck(_ context.Context) (*storage.MergeSlotStatus, error) {
+// mergeSlotIssue projects the slot state as the issue shape the interface
+// returns (the SQL reference stores the slot as a real bead).
+func mergeSlotIssue(state *mergeSlotState) *types.Issue {
+	return &types.Issue{ID: state.SlotID, Title: "Merge Slot", IssueType: "slot"}
+}
+
+func (s *FlatFileStore) MergeSlotCheck(ctx context.Context) (*storage.MergeSlotStatus, error) {
 	if err := s.checkClosed(); err != nil {
 		return nil, err
 	}
-	state, err := s.readMergeSlot()
+	state, err := s.readMergeSlot(s.mergeSlotID(ctx))
 	if err != nil {
 		return nil, err
 	}
@@ -59,13 +85,16 @@ func (s *FlatFileStore) MergeSlotCheck(_ context.Context) (*storage.MergeSlotSta
 	}, nil
 }
 
-func (s *FlatFileStore) MergeSlotAcquire(_ context.Context, holder, _ string, _ bool) (*storage.MergeSlotResult, error) {
+func (s *FlatFileStore) MergeSlotAcquire(ctx context.Context, holder, _ string, wait bool) (*storage.MergeSlotResult, error) {
 	if err := s.checkClosed(); err != nil {
 		return nil, err
 	}
+	if holder == "" {
+		return nil, fmt.Errorf("merge-slot acquire: holder must not be empty")
+	}
 	s.writeMu.Lock()
 	defer s.writeMu.Unlock()
-	state, err := s.readMergeSlot()
+	state, err := s.readMergeSlot(s.mergeSlotID(ctx))
 	if err != nil {
 		return nil, err
 	}
@@ -79,30 +108,59 @@ func (s *FlatFileStore) MergeSlotAcquire(_ context.Context, holder, _ string, _ 
 	if state.Holder == holder {
 		return &storage.MergeSlotResult{SlotID: state.SlotID, Acquired: true, Holder: holder}, nil
 	}
-	return &storage.MergeSlotResult{SlotID: state.SlotID, Acquired: false, Holder: state.Holder}, nil
+	result := &storage.MergeSlotResult{SlotID: state.SlotID, Acquired: false, Holder: state.Holder}
+	if wait {
+		// Mirror storage.MergeSlotAcquireImpl: queue the caller once and
+		// report its position as the current queue length.
+		alreadyWaiting := false
+		for _, w := range state.Waiters {
+			if w == holder {
+				alreadyWaiting = true
+				break
+			}
+		}
+		if !alreadyWaiting {
+			state.Waiters = append(state.Waiters, holder)
+			if err := s.writeMergeSlot(state); err != nil {
+				return nil, err
+			}
+		}
+		result.Waiting = true
+		result.Position = len(state.Waiters)
+	}
+	return result, nil
 }
 
-func (s *FlatFileStore) MergeSlotRelease(_ context.Context, holder, _ string) error {
+func (s *FlatFileStore) MergeSlotRelease(ctx context.Context, holder, _ string) error {
 	if err := s.checkClosed(); err != nil {
 		return err
 	}
 	s.writeMu.Lock()
 	defer s.writeMu.Unlock()
-	state, err := s.readMergeSlot()
+	state, err := s.readMergeSlot(s.mergeSlotID(ctx))
 	if err != nil {
 		return err
 	}
-	if state.Holder == holder {
-		state.Holder = ""
+	// Mirror storage.MergeSlotReleaseImpl: a non-matching holder is an error,
+	// an empty holder force-releases, and releasing a free slot is idempotent.
+	if holder != "" && state.Holder != holder {
+		return fmt.Errorf("slot held by %s, not %s", state.Holder, holder)
 	}
+	if state.Holder == "" {
+		return nil
+	}
+	state.Holder = ""
 	return s.writeMergeSlot(state)
 }
 
-func (s *FlatFileStore) readMergeSlot() (*mergeSlotState, error) {
+// readMergeSlot loads the slot state; a never-created slot is ErrNotFound
+// (parity with storage.MergeSlotCheckImpl/AcquireImpl, which require
+// 'bd merge-slot create' first).
+func (s *FlatFileStore) readMergeSlot(slotID string) (*mergeSlotState, error) {
 	data, err := os.ReadFile(s.mergeslotPath)
 	if err != nil {
 		if errors.Is(err, fs.ErrNotExist) {
-			return &mergeSlotState{SlotID: "merge-slot"}, nil
+			return nil, fmt.Errorf("merge slot not found: %s (run 'bd merge-slot create' first): %w", slotID, storage.ErrNotFound)
 		}
 		return nil, err
 	}
