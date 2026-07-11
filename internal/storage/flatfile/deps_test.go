@@ -2,10 +2,12 @@ package flatfile
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
 
+	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/types"
 )
 
@@ -201,5 +203,26 @@ func TestGetDependencyTree(t *testing.T) {
 	tree2, _ := s.GetDependencyTree(ctx, "t-3", 1, false, false)
 	if len(tree2) != 1 {
 		t.Errorf("depth-1 tree len = %d, want 1 (root only)", len(tree2))
+	}
+}
+
+func TestGetDependencyTreeMissingRoot(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+
+	s.CreateIssue(ctx, &types.Issue{ID: "t-1", Title: "Root"}, "tester")
+
+	// SQL backends (buildDependencyTreeInTx -> GetIssueInTx) return a wrapped
+	// storage.ErrNotFound for a mistyped root, not an empty tree.
+	_, err := s.GetDependencyTree(ctx, "typo-999", 10, false, false)
+	if !errors.Is(err, storage.ErrNotFound) {
+		t.Errorf("GetDependencyTree missing root err = %v, want storage.ErrNotFound", err)
+	}
+
+	// maxDepth <= 0 returns empty before the root lookup in the SQL walk, so
+	// the missing root is not an error there.
+	tree, err := s.GetDependencyTree(ctx, "typo-999", 0, false, false)
+	if err != nil || len(tree) != 0 {
+		t.Errorf("GetDependencyTree(maxDepth=0) = (%v, %v), want empty, nil", tree, err)
 	}
 }
