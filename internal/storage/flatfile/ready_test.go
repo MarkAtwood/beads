@@ -3,6 +3,8 @@ package flatfile
 import (
 	"context"
 	"encoding/json"
+	"os"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -226,6 +228,33 @@ func TestGetReadyWorkUnassignedPrecedesAssignee(t *testing.T) {
 	}
 	if len(ready) != 1 || ready[0].ID != "ua-2" {
 		t.Errorf("ready = %v, want [ua-2] (Unassigned wins over Assignee)", readyIDs(ready))
+	}
+}
+
+// SQL reference: the ready-with-counts comment-count subquery
+// (sqlbuild.SearchCountsSQL cc arm) propagates query errors; a comments-dir
+// read failure must fail GetReadyWorkWithCounts rather than silently report
+// CommentCount=0.
+func TestGetReadyWorkWithCountsCommentReadErrorPropagates(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root bypasses directory permissions")
+	}
+	s := newTestStore(t)
+	ctx := context.Background()
+
+	s.CreateIssue(ctx, &types.Issue{ID: "cce-1", Title: "Has comment", Status: types.StatusOpen}, "tester")
+	if _, err := s.AddIssueComment(ctx, "cce-1", "tester", "a comment"); err != nil {
+		t.Fatalf("AddIssueComment: %v", err)
+	}
+
+	dir := filepath.Join(s.commentsDir, "cce-1")
+	if err := os.Chmod(dir, 0); err != nil {
+		t.Fatalf("chmod: %v", err)
+	}
+	t.Cleanup(func() { os.Chmod(dir, 0o755) })
+
+	if _, err := s.GetReadyWorkWithCounts(ctx, types.WorkFilter{}); err == nil {
+		t.Fatal("GetReadyWorkWithCounts: want error on unreadable comments dir, got nil")
 	}
 }
 
