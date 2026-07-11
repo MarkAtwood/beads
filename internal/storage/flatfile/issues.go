@@ -504,9 +504,6 @@ func (s *FlatFileStore) CloseIssue(_ context.Context, id string, reason string, 
 	issue.LeaseExpiresAt = nil
 	issue.HeartbeatAt = nil
 	issue.UpdatedAt = now
-	if issue.Assignee == "" && actor != "" {
-		issue.Assignee = actor
-	}
 
 	if err := s.writeIssue(issue); err != nil {
 		return err
