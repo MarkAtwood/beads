@@ -336,3 +336,60 @@ func TestCountIssuesByGroupUnsupportedErrors(t *testing.T) {
 		t.Errorf("type=bug count = %d, want 2", counts["bug"])
 	}
 }
+
+// SQL parity (sqlbuild.AppendMetadataClauses): metadata filters compare
+// JSON_UNQUOTE(JSON_EXTRACT(...)) text — JSON source text for non-strings,
+// unquoted contents for strings — and invalid keys are an error.
+func TestSearchIssuesMetadataJSONTextComparison(t *testing.T) {
+	s := newTestStore(t)
+	meta := []byte(`{"count": 1.0, "env": "prod", "flag": true, "obj": {"a": 1}}`)
+	if err := s.CreateIssue(ctx, &types.Issue{ID: "m-1", Title: "with meta", Metadata: meta}, "tester"); err != nil {
+		t.Fatalf("CreateIssue: %v", err)
+	}
+	if err := s.CreateIssue(ctx, &types.Issue{ID: "m-2", Title: "no meta"}, "tester"); err != nil {
+		t.Fatalf("CreateIssue: %v", err)
+	}
+
+	cases := []struct {
+		name  string
+		key   string
+		value string
+		want  int
+	}{
+		{"number JSON text", "count", "1.0", 1},
+		{"number fmt %%v text does not match", "count", "1", 0},
+		{"string unquoted", "env", "prod", 1},
+		{"string quoted does not match", "env", `"prod"`, 0},
+		{"bool JSON text", "flag", "true", 1},
+		{"object compact JSON text", "obj", `{"a":1}`, 1},
+		{"missing key", "nope", "x", 0},
+	}
+	for _, tc := range cases {
+		got, err := s.SearchIssues(ctx, "", types.IssueFilter{
+			MetadataFields: map[string]string{tc.key: tc.value},
+		})
+		if err != nil {
+			t.Fatalf("%s: SearchIssues: %v", tc.name, err)
+		}
+		if len(got) != tc.want {
+			t.Errorf("%s: got %d issues, want %d", tc.name, len(got), tc.want)
+		}
+	}
+}
+
+func TestSearchIssuesMetadataInvalidKeyErrors(t *testing.T) {
+	s := newTestStore(t)
+	seedIssues(t, s)
+
+	_, err := s.SearchIssues(ctx, "", types.IssueFilter{
+		MetadataFields: map[string]string{"bad key!": "x"},
+	})
+	if err == nil {
+		t.Error("MetadataFields with invalid key: want error, got nil")
+	}
+
+	_, err = s.SearchIssues(ctx, "", types.IssueFilter{HasMetadataKey: "1leading-digit"})
+	if err == nil {
+		t.Error("HasMetadataKey with invalid key: want error, got nil")
+	}
+}
