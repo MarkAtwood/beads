@@ -84,6 +84,40 @@ func makeConflictedMerge(t *testing.T, dir, branch string) {
 	}
 }
 
+// TASKS-rkqg: CommitPending must commit only .beads/, never sweep the user's
+// own staged files into a bd auto-commit.
+func TestCommitPendingScopedToBeads(t *testing.T) {
+	ctx := context.Background()
+	s, dir := newGitStore(t, "main")
+
+	// User stages their own file; bd has a pending issue change.
+	if err := os.WriteFile(filepath.Join(dir, "app.c"), []byte("int main(){}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	gitRun(t, dir, "add", "app.c")
+	writeIssueFile(t, dir, "test-1", "pending edit")
+
+	committed, err := s.CommitPending(ctx, "")
+	if err != nil {
+		t.Fatalf("CommitPending: %v", err)
+	}
+	if !committed {
+		t.Fatal("expected CommitPending to commit the pending .beads change")
+	}
+	// Oracle: git — the auto-commit contains only .beads paths, and app.c is
+	// still staged for the user's own commit.
+	files := gitRun(t, dir, "show", "--name-only", "--format=", "HEAD")
+	if strings.Contains(files, "app.c") {
+		t.Fatalf("auto-commit swept user file: %q", files)
+	}
+	if !strings.Contains(files, ".beads/issues/test-1.json") {
+		t.Fatalf("auto-commit missing bd change: %q", files)
+	}
+	if staged := gitRun(t, dir, "diff", "--cached", "--name-only"); !strings.Contains(staged, "app.c") {
+		t.Fatalf("user's staged file lost from index: %q", staged)
+	}
+}
+
 // newPeerClone creates a bare peer repo seeded from repoDir (registered there
 // as remote "peer") plus a working clone of it, and returns the clone dir.
 func newPeerClone(t *testing.T, repoDir, branch string) string {

@@ -122,7 +122,9 @@ func (s *FlatFileStore) CommitPending(ctx context.Context, _ string) (bool, erro
 		return false, nil
 	}
 	_, _ = s.git(ctx, "add", ".beads/")
-	_, err = s.git(ctx, "commit", "-m", "bd: auto-commit pending changes")
+	// Pathspec-scoped like Commit: an unrestricted commit would sweep the
+	// user's own staged files into a bd auto-commit.
+	_, err = s.git(ctx, "commit", "-m", "bd: auto-commit pending changes", "--", ".beads/")
 	return err == nil, err
 }
 
