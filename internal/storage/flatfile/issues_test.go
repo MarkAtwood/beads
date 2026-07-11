@@ -790,3 +790,51 @@ func TestUpdateIssueManagesLease(t *testing.T) {
 		t.Errorf("lease stamped for unassigned in_progress: lease=%v heartbeat=%v", got.LeaseExpiresAt, got.HeartbeatAt)
 	}
 }
+
+func TestCreateIssueValidates(t *testing.T) {
+	s := newTestStore(t)
+
+	// SQL backends run PrepareIssueForInsert → ValidateWithCustom on every
+	// create; flatfile must reject the same inputs instead of persisting them.
+	cases := []struct {
+		name  string
+		issue *types.Issue
+	}{
+		{"invalid status", &types.Issue{ID: "val-1", Title: "x", Status: types.Status("bogus")}},
+		{"invalid issue type", &types.Issue{ID: "val-2", Title: "x", IssueType: types.IssueType("tsak")}},
+		{"priority out of range", &types.Issue{ID: "val-3", Title: "x", Priority: 9}},
+		{"malformed metadata", &types.Issue{ID: "val-4", Title: "x", Metadata: json.RawMessage("{oops")}},
+		{"missing title", &types.Issue{ID: "val-5"}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if err := s.CreateIssue(ctx, tc.issue, "tester"); err == nil {
+				t.Fatal("CreateIssue: expected validation error, got nil")
+			}
+			if _, err := s.GetIssue(ctx, tc.issue.ID); err != storage.ErrNotFound {
+				t.Errorf("invalid issue persisted: GetIssue err = %v, want ErrNotFound", err)
+			}
+		})
+	}
+
+	// A configured custom type is accepted, matching ValidateWithCustom.
+	if err := s.SetConfig(ctx, "types.custom", "research"); err != nil {
+		t.Fatalf("SetConfig(types.custom): %v", err)
+	}
+	custom := &types.Issue{ID: "val-ok", Title: "x", IssueType: types.IssueType("research")}
+	if err := s.CreateIssue(ctx, custom, "tester"); err != nil {
+		t.Fatalf("CreateIssue(custom type): %v", err)
+	}
+
+	// The batch path validates every member before writing anything.
+	batch := []*types.Issue{
+		{ID: "val-b1", Title: "fine"},
+		{ID: "val-b2", Title: "bad", Status: types.Status("bogus")},
+	}
+	if err := s.CreateIssues(ctx, batch, "tester"); err == nil {
+		t.Fatal("CreateIssues: expected validation error, got nil")
+	}
+	if _, err := s.GetIssue(ctx, "val-b1"); err != storage.ErrNotFound {
+		t.Errorf("batch member written despite failed batch: err = %v, want ErrNotFound", err)
+	}
+}

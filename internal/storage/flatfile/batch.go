@@ -76,6 +76,12 @@ func (s *FlatFileStore) CreateIssuesWithFullOptions(ctx context.Context, issues 
 		}
 		prepareIssueDefaults(issue, actor)
 
+		// Mirrors issueops.CreateIssueInTxWithResult: PrepareIssueForInsert
+		// validates every batch member before anything is written.
+		if err := s.validateIssueForInsert(ctx, issue); err != nil {
+			return err
+		}
+
 		if issue.ID == "" {
 			prefix := configPrefix
 			if prefix == "" {
