@@ -83,10 +83,18 @@ func (s *FlatFileStore) Branch(ctx context.Context, name string) error {
 	return err
 }
 
+// Checkout rewrites .beads/ files in the working tree, so — like every
+// working-tree-mutating git op below (Merge, ResolveConflicts, Pull,
+// PullRemote, PullFrom, Sync) — it takes the store's write lock: without it a
+// concurrent transaction could journal a pre-image, have git rewrite the file,
+// and then roll back the journal, silently reverting the checked-out/merged/
+// pulled state (and a writeIssue rename in flight could clobber a just-merged
+// file or abort the merge on "local changes would be overwritten").
 func (s *FlatFileStore) Checkout(ctx context.Context, branch string) error {
 	if err := validateGitArg("branch name", branch); err != nil {
 		return err
 	}
+	defer s.lockWrite()()
 	_, err := s.git(ctx, "checkout", branch)
 	return err
 }
@@ -249,6 +257,7 @@ func (s *FlatFileStore) Merge(ctx context.Context, branch string) ([]storage.Con
 	if err := validateGitArg("branch", branch); err != nil {
 		return nil, err
 	}
+	defer s.lockWrite()() // working-tree-mutating: see Checkout
 	_, err := s.git(ctx, "merge", branch)
 	if err != nil {
 		conflicts, _ := s.GetConflicts(ctx)
@@ -293,6 +302,7 @@ func (s *FlatFileStore) ResolveConflicts(ctx context.Context, _ string, strategy
 	default:
 		return fmt.Errorf("flatfile: unknown conflict strategy: %s", strategy)
 	}
+	defer s.lockWrite()() // working-tree-mutating: see Checkout
 
 	out, err := s.git(ctx, "ls-files", "-u", "--", ".beads/")
 	if err != nil {
@@ -529,6 +539,7 @@ func (s *FlatFileStore) Push(ctx context.Context) error {
 }
 
 func (s *FlatFileStore) Pull(ctx context.Context) error {
+	defer s.lockWrite()() // working-tree-mutating: see Checkout
 	_, err := s.git(ctx, "pull")
 	return err
 }
@@ -554,6 +565,7 @@ func (s *FlatFileStore) PullRemote(ctx context.Context, remote string) error {
 	if err := validateGitArg("remote", remote); err != nil {
 		return err
 	}
+	defer s.lockWrite()() // working-tree-mutating: see Checkout
 	_, err := s.git(ctx, "pull", remote)
 	return err
 }
@@ -578,6 +590,7 @@ func (s *FlatFileStore) PullFrom(ctx context.Context, peer string) ([]storage.Co
 	if err := validateGitArg("peer", peer); err != nil {
 		return nil, err
 	}
+	defer s.lockWrite()() // working-tree-mutating: see Checkout
 	_, err := s.git(ctx, "pull", peer)
 	if err != nil {
 		conflicts, _ := s.GetConflicts(ctx)
@@ -592,6 +605,7 @@ func (s *FlatFileStore) Sync(ctx context.Context, peer string, _ string) (*stora
 	if err := validateGitArg("peer", peer); err != nil {
 		return nil, err
 	}
+	defer s.lockWrite()() // working-tree-mutating (merge step): see Checkout
 	start := time.Now()
 	result := &storage.SyncResult{Peer: peer, StartTime: start}
 

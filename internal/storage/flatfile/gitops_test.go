@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/steveyegge/beads/internal/storage"
 )
@@ -500,6 +501,69 @@ func TestSyncUsesCurrentBranch(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(dir, ".beads", "issues", "test-2.json")); err != nil {
 		t.Fatalf("peer issue not merged in: %v", err)
+	}
+}
+
+// TASKS-8wtk: working-tree-mutating git ops must be excluded from an open
+// transaction (txMu/writeMu), or the transaction's rollback can restore a
+// pre-merge journal image over the just-merged state — or the merge aborts on
+// the transaction's uncommitted write ("local changes would be overwritten").
+// Mirrors TestRollbackDoesNotRevertConcurrentNonTxWrite with Merge as the
+// concurrent mutator.
+func TestMergeExcludedFromOpenTransaction(t *testing.T) {
+	ctx := context.Background()
+	s, dir := newGitStore(t, "main")
+
+	// Side branch is strictly ahead: test-1 edited to "merged edit".
+	gitRun(t, dir, "checkout", "-q", "-b", "side")
+	writeIssueFile(t, dir, "test-1", "merged edit")
+	gitRun(t, dir, "commit", "-q", "-am", "side edit")
+	gitRun(t, dir, "checkout", "-q", "main")
+
+	txStarted := make(chan struct{})
+	mergeDone := make(chan error, 1)
+	go func() {
+		<-txStarted
+		_, err := s.Merge(ctx, "side")
+		mergeDone <- err
+	}()
+
+	sentinel := errors.New("boom")
+	err := s.RunInTransaction(ctx, "", func(tx storage.Transaction) error {
+		// Journal test-1's pre-image ("initial") inside the transaction.
+		if err := tx.UpdateIssue(ctx, "test-1", map[string]interface{}{"title": "tx edit"}, "tester"); err != nil {
+			return err
+		}
+		close(txStarted)
+		// Pre-fix the unlocked Merge runs here: it either aborts on the
+		// transaction's dirty test-1 or fast-forwards it, only for the
+		// rollback below to restore the pre-merge image.
+		select {
+		case err := <-mergeDone:
+			mergeDone <- err
+			t.Error("Merge completed inside an open transaction")
+		case <-time.After(100 * time.Millisecond):
+		}
+		return sentinel
+	})
+	if !errors.Is(err, sentinel) {
+		t.Fatalf("RunInTransaction error = %v, want sentinel", err)
+	}
+	if err := <-mergeDone; err != nil {
+		t.Fatalf("concurrent Merge: %v", err)
+	}
+
+	// The merged state must survive the rollback, and the rollback must not
+	// leave the tree dirty against the merged HEAD.
+	data, err := os.ReadFile(filepath.Join(dir, ".beads", "issues", "test-1.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(data), "merged edit") {
+		t.Errorf("merged state reverted by foreign rollback: %q", string(data))
+	}
+	if out := gitRun(t, dir, "status", "--porcelain", ".beads/"); out != "" {
+		t.Errorf("tree dirty after rollback + merge: %q", out)
 	}
 }
 
