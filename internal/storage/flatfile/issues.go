@@ -404,7 +404,9 @@ func (s *FlatFileStore) UpdateIssue(ctx context.Context, id string, updates map[
 		issue.Metadata = json.RawMessage(metadataStr)
 	}
 
-	applyUpdates(issue, updates)
+	if err := applyUpdates(issue, updates); err != nil {
+		return err
+	}
 
 	newStatus, hasStatus := updateStatusValue(updates)
 	if hasStatus {
@@ -538,8 +540,9 @@ func (s *FlatFileStore) DeleteIssue(_ context.Context, id string) error {
 }
 
 // applyUpdates applies a map of field name → value to an issue struct.
-// Supported keys match the JSON field names of types.Issue.
-func applyUpdates(issue *types.Issue, updates map[string]interface{}) {
+// Supported keys match the JSON field names of types.Issue. A key that passed
+// IsAllowedUpdateField but has no case here is an error, never a silent no-op.
+func applyUpdates(issue *types.Issue, updates map[string]interface{}) error {
 	for key, val := range updates {
 		switch key {
 		case "title":
@@ -661,8 +664,48 @@ func applyUpdates(issue *types.Issue, updates map[string]interface{}) {
 			case *int:
 				issue.EstimatedMinutes = v
 			}
+		case "sender":
+			if v, ok := val.(string); ok {
+				issue.Sender = v
+			}
+		case "await_id":
+			if v, ok := val.(string); ok {
+				issue.AwaitID = v
+			}
+		case "mol_type":
+			switch v := val.(type) {
+			case string:
+				issue.MolType = types.MolType(v)
+			case types.MolType:
+				issue.MolType = v
+			}
+		case "waiters":
+			// SQL stores waiters as a JSON-marshaled TEXT column; the struct
+			// field is []string, so accept the shapes callers actually pass.
+			switch v := val.(type) {
+			case nil:
+				issue.Waiters = nil
+			case []string:
+				issue.Waiters = v
+			case []interface{}:
+				waiters := make([]string, 0, len(v))
+				for _, w := range v {
+					if s, ok := w.(string); ok {
+						waiters = append(waiters, s)
+					}
+				}
+				issue.Waiters = waiters
+			}
+		default:
+			// Every key IsAllowedUpdateField admits must have a case above:
+			// silently dropping one reports success without persisting the
+			// update. event_category/event_actor/event_target/event_payload
+			// land here deliberately — no SQL backend has those columns, so
+			// the reference UPDATE fails for them too.
+			return fmt.Errorf("flatfile: unsupported update field: %s", key)
 		}
 	}
+	return nil
 }
 
 // timePtrValue coerces an update value into a *time.Time, treating nil (and

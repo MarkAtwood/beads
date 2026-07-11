@@ -683,3 +683,61 @@ func TestUpdateIssueTypedEnumValues(t *testing.T) {
 		t.Error("ClosedAt not stamped on typed close")
 	}
 }
+
+func TestUpdateIssueGateAndMessagingFields(t *testing.T) {
+	s := newTestStore(t)
+
+	s.CreateIssue(ctx, &types.Issue{ID: "gate-1", Title: "A gate"}, "tester")
+
+	// The SQL path persists all of these as columns (waiters JSON-marshaled);
+	// real callers: bd gate wait (waiters), gate discovery (await_id).
+	updates := map[string]interface{}{
+		"waiters":  []string{"alice@example.com", "bob@example.com"},
+		"await_id": "run-42",
+		"sender":   "mailer",
+		"mol_type": types.MolTypeSwarm,
+	}
+	if err := s.UpdateIssue(ctx, "gate-1", updates, "tester"); err != nil {
+		t.Fatalf("UpdateIssue: %v", err)
+	}
+
+	got, err := s.GetIssue(ctx, "gate-1")
+	if err != nil {
+		t.Fatalf("GetIssue: %v", err)
+	}
+	if len(got.Waiters) != 2 || got.Waiters[0] != "alice@example.com" || got.Waiters[1] != "bob@example.com" {
+		t.Errorf("Waiters = %v, want the two persisted addresses", got.Waiters)
+	}
+	if got.AwaitID != "run-42" {
+		t.Errorf("AwaitID = %q, want %q", got.AwaitID, "run-42")
+	}
+	if got.Sender != "mailer" {
+		t.Errorf("Sender = %q, want %q", got.Sender, "mailer")
+	}
+	if got.MolType != types.MolTypeSwarm {
+		t.Errorf("MolType = %q, want %q", got.MolType, types.MolTypeSwarm)
+	}
+
+	// Clearing waiters with nil mirrors writing NULL/empty on SQL.
+	if err := s.UpdateIssue(ctx, "gate-1", map[string]interface{}{"waiters": nil}, "tester"); err != nil {
+		t.Fatalf("UpdateIssue(clear waiters): %v", err)
+	}
+	got, _ = s.GetIssue(ctx, "gate-1")
+	if len(got.Waiters) != 0 {
+		t.Errorf("Waiters = %v, want empty after clear", got.Waiters)
+	}
+}
+
+func TestUpdateIssueUnhandledAllowedFieldErrors(t *testing.T) {
+	s := newTestStore(t)
+
+	s.CreateIssue(ctx, &types.Issue{ID: "evt-1", Title: "Event fields"}, "tester")
+
+	// event_category passes IsAllowedUpdateField but no backend has such a
+	// column: the SQL UPDATE fails, so flatfile must error too instead of
+	// reporting success while dropping the value.
+	err := s.UpdateIssue(ctx, "evt-1", map[string]interface{}{"event_category": "patrol"}, "tester")
+	if err == nil {
+		t.Fatal("UpdateIssue(event_category): expected error, got nil")
+	}
+}
