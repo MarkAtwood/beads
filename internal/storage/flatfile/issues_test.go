@@ -588,3 +588,23 @@ func TestLoadAllIssuesSkipsCorrupt(t *testing.T) {
 		t.Errorf("got ID %q, want %q", issues[0].ID, "good-1")
 	}
 }
+
+func TestCloseIssueDoesNotAssignActor(t *testing.T) {
+	s := newTestStore(t)
+
+	// issueops.CloseIssueInTx (the SQL reference) never writes assignee on
+	// close; an unassigned issue must stay unassigned after CloseIssue.
+	s.CreateIssue(ctx, &types.Issue{ID: "close-noassign", Title: "Unassigned"}, "tester")
+
+	if err := s.CloseIssue(ctx, "close-noassign", "done", "closer", "sess"); err != nil {
+		t.Fatalf("CloseIssue: %v", err)
+	}
+
+	got, err := s.GetIssue(ctx, "close-noassign")
+	if err != nil {
+		t.Fatalf("GetIssue: %v", err)
+	}
+	if got.Assignee != "" {
+		t.Errorf("Assignee = %q, want empty (close must not assign the closer)", got.Assignee)
+	}
+}
