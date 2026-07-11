@@ -2,11 +2,14 @@ package flatfile
 
 import (
 	"context"
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/steveyegge/beads/internal/storage"
 )
 
 // gitRun runs git in dir and fails the test on error.
@@ -132,6 +135,11 @@ func TestReadPathsPropagateGitFailures(t *testing.T) {
 	if _, err := s.CommitExists(ctx, "deadbeef"); err == nil {
 		t.Error("CommitExists in non-repo: want error, got nil")
 	}
+	// TASKS-muo9: AsOf must not collapse "not a git repository" into
+	// ErrNotFound — the caller would conclude the issue never existed.
+	if _, err := s.AsOf(ctx, "test-1", "HEAD"); err == nil || errors.Is(err, storage.ErrNotFound) {
+		t.Errorf("AsOf in non-repo = %v, want non-ErrNotFound error", err)
+	}
 }
 
 // TASKS-m49g: the one benign case — a repo with no commits yet — still reads
@@ -164,6 +172,23 @@ func TestBenignGitCasesStayQuiet(t *testing.T) {
 		if ok, err := s2.CommitExists(ctx, missing); err != nil || ok {
 			t.Errorf("CommitExists(%s) = (%v, %v), want (false, nil)", missing, ok, err)
 		}
+	}
+
+	// TASKS-muo9: the benign AsOf cases stay ErrNotFound — issue absent at a
+	// valid ref (tracked or on disk only) and a ref that does not resolve.
+	if _, err := s2.AsOf(ctx, "test-9", "HEAD"); !errors.Is(err, storage.ErrNotFound) {
+		t.Errorf("AsOf(missing issue) = %v, want ErrNotFound", err)
+	}
+	writeIssueFile(t, dir2, "test-9", "on disk only")
+	if _, err := s2.AsOf(ctx, "test-9", "HEAD"); !errors.Is(err, storage.ErrNotFound) {
+		t.Errorf("AsOf(untracked issue) = %v, want ErrNotFound", err)
+	}
+	if _, err := s2.AsOf(ctx, "test-1", "no-such-ref"); !errors.Is(err, storage.ErrNotFound) {
+		t.Errorf("AsOf(bad ref) = %v, want ErrNotFound", err)
+	}
+	// And the existing issue still loads at HEAD.
+	if issue, err := s2.AsOf(ctx, "test-1", "HEAD"); err != nil || issue == nil || issue.ID != "test-1" {
+		t.Errorf("AsOf(test-1, HEAD) = (%v, %v), want issue", issue, err)
 	}
 }
 

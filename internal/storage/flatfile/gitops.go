@@ -331,7 +331,18 @@ func (s *FlatFileStore) AsOf(ctx context.Context, issueID string, ref string) (*
 	file := fmt.Sprintf(".beads/issues/%s.json", issueID)
 	content, err := s.git(ctx, "show", ref+":"+file)
 	if err != nil {
-		return nil, storage.ErrNotFound
+		// Only "the issue/ref genuinely isn't there" reads as ErrNotFound
+		// (mirroring CommitExists); a canceled context, missing git binary,
+		// or corrupted repo must surface as the error it is, not as "the
+		// issue never existed at that ref".
+		if gitErrContains(err,
+			"does not exist in",
+			"exists on disk, but not in",
+			"Not a valid object name",
+			"invalid object name") {
+			return nil, storage.ErrNotFound
+		}
+		return nil, err
 	}
 	var issue types.Issue
 	if err := json.Unmarshal([]byte(content), &issue); err != nil {
