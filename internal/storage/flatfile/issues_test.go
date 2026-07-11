@@ -741,3 +741,52 @@ func TestUpdateIssueUnhandledAllowedFieldErrors(t *testing.T) {
 		t.Fatal("UpdateIssue(event_category): expected error, got nil")
 	}
 }
+
+func TestUpdateIssueManagesLease(t *testing.T) {
+	s := newTestStore(t)
+
+	s.CreateIssue(ctx, &types.Issue{ID: "lease-1", Title: "Lease me"}, "tester")
+
+	// Direct in_progress+assignee update stamps a fresh lease (SQL
+	// issueops.ManageLeaseOnUpdate parity) so ReclaimExpiredLeases can
+	// recover the issue if the worker dies.
+	before := time.Now().UTC()
+	updates := map[string]interface{}{
+		"status":   "in_progress",
+		"assignee": "bob",
+	}
+	if err := s.UpdateIssue(ctx, "lease-1", updates, "tester"); err != nil {
+		t.Fatalf("UpdateIssue: %v", err)
+	}
+	got, err := s.GetIssue(ctx, "lease-1")
+	if err != nil {
+		t.Fatalf("GetIssue: %v", err)
+	}
+	if got.LeaseExpiresAt == nil {
+		t.Fatal("LeaseExpiresAt is nil after in_progress+assignee update")
+	}
+	if !got.LeaseExpiresAt.After(before) {
+		t.Errorf("LeaseExpiresAt = %v, want after %v", got.LeaseExpiresAt, before)
+	}
+	if got.HeartbeatAt == nil {
+		t.Fatal("HeartbeatAt is nil after in_progress+assignee update")
+	}
+
+	// Returning the issue to open clears the now-stale lease fields.
+	if err := s.UpdateIssue(ctx, "lease-1", map[string]interface{}{"status": "open"}, "tester"); err != nil {
+		t.Fatalf("UpdateIssue(open): %v", err)
+	}
+	got, _ = s.GetIssue(ctx, "lease-1")
+	if got.LeaseExpiresAt != nil || got.HeartbeatAt != nil {
+		t.Errorf("lease fields not cleared on reopen: lease=%v heartbeat=%v", got.LeaseExpiresAt, got.HeartbeatAt)
+	}
+
+	// in_progress without an assignee is not leased work: no lease stamped.
+	if err := s.UpdateIssue(ctx, "lease-1", map[string]interface{}{"assignee": "", "status": "in_progress"}, "tester"); err != nil {
+		t.Fatalf("UpdateIssue(in_progress, no assignee): %v", err)
+	}
+	got, _ = s.GetIssue(ctx, "lease-1")
+	if got.LeaseExpiresAt != nil || got.HeartbeatAt != nil {
+		t.Errorf("lease stamped for unassigned in_progress: lease=%v heartbeat=%v", got.LeaseExpiresAt, got.HeartbeatAt)
+	}
+}
