@@ -1,6 +1,7 @@
 package flatfile
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -10,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/storage/issueops"
 	"github.com/steveyegge/beads/internal/storage/sqlbuild"
 	"github.com/steveyegge/beads/internal/types"
@@ -39,6 +41,19 @@ func (s *FlatFileStore) SearchIssues(_ context.Context, query string, filter typ
 	if filter.LabelPattern != "" {
 		if _, err := filepath.Match(filter.LabelPattern, ""); err != nil {
 			return nil, fmt.Errorf("invalid label pattern %q: %w", filter.LabelPattern, err)
+		}
+	}
+
+	// SQL contract (sqlbuild.AppendMetadataClauses): metadata keys are
+	// validated and invalid keys error rather than silently matching nothing.
+	if filter.HasMetadataKey != "" {
+		if err := storage.ValidateMetadataKey(filter.HasMetadataKey); err != nil {
+			return nil, err
+		}
+	}
+	for k := range filter.MetadataFields {
+		if err := storage.ValidateMetadataKey(k); err != nil {
+			return nil, err
 		}
 	}
 
@@ -560,9 +575,10 @@ func sortIssues(issues []*types.Issue, sortBy string, desc bool) {
 
 // matchesMetadataFilter applies the metadata predicates shared by the search
 // and ready paths, mirroring sqlbuild.AppendMetadataClauses: every
-// MetadataFields entry must equal the issue's top-level JSON value, and
-// HasMetadataKey must be present. An issue with no (or unparseable) metadata
-// matches only when no predicate is set (JSON_EXTRACT on NULL yields NULL).
+// MetadataFields entry must equal the issue's top-level JSON value under
+// JSON_UNQUOTE semantics (see metadataUnquote), and HasMetadataKey must be
+// present. An issue with no (or unparseable) metadata matches only when no
+// predicate is set (JSON_EXTRACT on NULL yields NULL).
 func matchesMetadataFilter(issue *types.Issue, fields map[string]string, hasKey string) bool {
 	if len(fields) == 0 && hasKey == "" {
 		return true
@@ -570,13 +586,13 @@ func matchesMetadataFilter(issue *types.Issue, fields map[string]string, hasKey 
 	if len(issue.Metadata) == 0 {
 		return false
 	}
-	var meta map[string]interface{}
+	var meta map[string]json.RawMessage
 	if json.Unmarshal(issue.Metadata, &meta) != nil {
 		return false
 	}
-	for k, v := range fields {
-		mv, ok := meta[k]
-		if !ok || fmt.Sprintf("%v", mv) != v {
+	for k, want := range fields {
+		raw, ok := meta[k]
+		if !ok || metadataUnquote(raw) != want {
 			return false
 		}
 	}
@@ -586,6 +602,24 @@ func matchesMetadataFilter(issue *types.Issue, fields map[string]string, hasKey 
 		}
 	}
 	return true
+}
+
+// metadataUnquote mirrors SQL JSON_UNQUOTE(JSON_EXTRACT(...)): a JSON string
+// compares by its unquoted contents, any other value by its compact JSON text
+// (so {"count": 1.0} compares as "1.0", not fmt's "1").
+func metadataUnquote(raw json.RawMessage) string {
+	trimmed := bytes.TrimSpace(raw)
+	if len(trimmed) > 0 && trimmed[0] == '"' {
+		var s string
+		if json.Unmarshal(trimmed, &s) == nil {
+			return s
+		}
+	}
+	var buf bytes.Buffer
+	if json.Compact(&buf, trimmed) != nil {
+		return string(trimmed)
+	}
+	return buf.String()
 }
 
 func containsCI(s, substr string) bool {
