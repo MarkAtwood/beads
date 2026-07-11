@@ -80,7 +80,7 @@ func (s *FlatFileStore) commitTransaction(ctx context.Context, commitMsg string)
 	if _, err := s.git(ctx, "rev-parse", "--is-inside-work-tree"); err != nil {
 		return nil
 	}
-	out, err := s.git(ctx, "status", "--porcelain", ".beads/")
+	out, err := s.git(ctx, "status", "--porcelain", s.beadsPathspec())
 	if err != nil {
 		return err
 	}
