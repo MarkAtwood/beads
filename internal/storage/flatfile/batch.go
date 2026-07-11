@@ -133,6 +133,10 @@ func (s *FlatFileStore) CreateIssuesWithFullOptions(ctx context.Context, issues 
 		case stored == nil:
 			final := *issue
 			final.Dependencies = nil
+			// Comments live in the comments/ store (imported in the write
+			// phase); embedding them in the issue file would leave a stale
+			// duplicate that never sees later comment writes.
+			final.Comments = nil
 			final.Labels = dedupeLabels(issue.Labels)
 			plan.final = &final
 			plan.isNew = true
@@ -152,6 +156,7 @@ func (s *FlatFileStore) CreateIssuesWithFullOptions(ctx context.Context, issues 
 			// Plain upsert: incoming columns win; stored aux merges additively.
 			final := *issue
 			final.Dependencies = stored.Dependencies
+			final.Comments = nil // comments/ store only, as above
 			final.Labels, plan.addLabels = unionLabels(stored.Labels, issue.Labels)
 			plan.final = &final
 		}

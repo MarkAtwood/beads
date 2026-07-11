@@ -320,7 +320,12 @@ func (s *FlatFileStore) CreateIssue(ctx context.Context, issue *types.Issue, act
 		return fmt.Errorf("flatfile: issue %s already exists", issue.ID)
 	}
 
-	if err := s.writeIssue(issue); err != nil {
+	// Comments live in the comments/ store (imported below, mirroring
+	// issueops.PersistComments); embedding them in the issue file would
+	// leave a stale duplicate that never sees later comment writes.
+	toWrite := *issue
+	toWrite.Comments = nil
+	if err := s.writeIssue(&toWrite); err != nil {
 		return err
 	}
 	if err := s.recordEvent(issue.ID, types.EventCreated, actor, "", ""); err != nil {
@@ -335,6 +340,17 @@ func (s *FlatFileStore) CreateIssue(ctx context.Context, issue *types.Issue, act
 		}
 		seen[label] = struct{}{}
 		if err := s.recordCommentEvent(issue.ID, issueops.IsWisp(issue), types.EventLabelAdded, actor, "Added label: "+label); err != nil {
+			return err
+		}
+	}
+	// Mirror issueops.PersistComments: comments carried on the created issue
+	// go to the comments store.
+	for _, comment := range issue.Comments {
+		createdAt := comment.CreatedAt
+		if createdAt.IsZero() {
+			createdAt = time.Now().UTC()
+		}
+		if _, err := s.ImportIssueComment(ctx, issue.ID, comment.Author, comment.Text, createdAt); err != nil {
 			return err
 		}
 	}
