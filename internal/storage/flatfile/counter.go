@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"io/fs"
 	"os"
+	"strconv"
+	"strings"
 )
 
 // counterState holds the per-prefix sequential ID counters and the
@@ -25,6 +27,17 @@ func (s *FlatFileStore) nextSequentialID(prefix string) (string, error) {
 	state, err := s.readCounter()
 	if err != nil {
 		return "", err
+	}
+
+	// First allocation for a prefix seeds from existing issue files (mirrors
+	// issueops.SeedCounterFromExistingIssuesTx) so generated sequential IDs
+	// never collide with imported ones.
+	if _, ok := state.Prefixes[prefix]; !ok {
+		seed, err := s.maxSequentialSuffix(prefix)
+		if err != nil {
+			return "", err
+		}
+		state.Prefixes[prefix] = seed
 	}
 
 	next := state.Prefixes[prefix] + 1
@@ -49,6 +62,32 @@ func (s *FlatFileStore) peekSequentialID(prefix string) (int, error) {
 	}
 
 	return state.Prefixes[prefix], nil
+}
+
+// maxSequentialSuffix returns the highest purely-numeric ID suffix among
+// existing issue files for a prefix (0 when there are none). Non-numeric
+// suffixes — hash IDs, hierarchical children — are skipped, matching the
+// Atoi-style parse in issueops.SeedCounterFromExistingIssuesTx.
+func (s *FlatFileStore) maxSequentialSuffix(prefix string) (int, error) {
+	entries, err := os.ReadDir(s.issuesDir)
+	if err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			return 0, nil
+		}
+		return 0, fmt.Errorf("flatfile: scan issues for counter seed: %w", err)
+	}
+	maxNum := 0
+	pfx := prefix + "-"
+	for _, e := range entries {
+		name, ok := strings.CutSuffix(e.Name(), ".json")
+		if !ok || !strings.HasPrefix(name, pfx) {
+			continue
+		}
+		if n, err := strconv.Atoi(name[len(pfx):]); err == nil && n > maxNum {
+			maxNum = n
+		}
+	}
+	return maxNum, nil
 }
 
 // readCounter reads the counter state from disk.
