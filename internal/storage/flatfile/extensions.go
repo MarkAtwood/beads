@@ -17,7 +17,9 @@ import (
 	"strings"
 	"time"
 
+	"github.com/steveyegge/beads/internal/config"
 	"github.com/steveyegge/beads/internal/storage"
+	"github.com/steveyegge/beads/internal/storage/domain"
 	"github.com/steveyegge/beads/internal/storage/issueops"
 	"github.com/steveyegge/beads/internal/types"
 )
@@ -1530,18 +1532,35 @@ func (s *FlatFileStore) GetCustomTypes(_ context.Context) ([]string, error) {
 	return list, nil
 }
 
-var infraTypes = map[string]bool{
-	"gate":          true,
-	"molecule":      true,
-	"merge-request": true,
+// GetInfraTypes mirrors issueops.ResolveInfraTypesInTx: the 'types.infra'
+// config key wins, then config.yaml's types.infra, then
+// domain.DefaultInfraTypes(). A fresh map is built per call so callers cannot
+// corrupt shared state. A config read error falls through to YAML/defaults,
+// matching sqlkit's explicit fallback (a silent nil here would let
+// 'bd wisp gc' hard-delete protected infra beads).
+func (s *FlatFileStore) GetInfraTypes(ctx context.Context) map[string]bool {
+	var typeList []string
+	if value, err := s.GetConfig(ctx, "types.infra"); err == nil && value != "" {
+		typeList = issueops.ParseCommaSeparatedList(value)
+	}
+	if len(typeList) == 0 {
+		if yamlTypes := config.GetInfraTypesFromYAML(); len(yamlTypes) > 0 {
+			typeList = yamlTypes
+		}
+	}
+	if len(typeList) == 0 {
+		typeList = domain.DefaultInfraTypes()
+	}
+	result := make(map[string]bool, len(typeList))
+	for _, t := range typeList {
+		result[t] = true
+	}
+	return result
 }
 
-func (s *FlatFileStore) GetInfraTypes(_ context.Context) map[string]bool {
-	return infraTypes
-}
-
-func (s *FlatFileStore) IsInfraTypeCtx(_ context.Context, t types.IssueType) bool {
-	return infraTypes[string(t)]
+// IsInfraTypeCtx reports whether t is a configured infrastructure type.
+func (s *FlatFileStore) IsInfraTypeCtx(ctx context.Context, t types.IssueType) bool {
+	return s.GetInfraTypes(ctx)[string(t)]
 }
 
 // ── AdvancedQueryStore ───────────────────────────────────────────────
