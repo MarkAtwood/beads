@@ -35,8 +35,12 @@ func (s *FlatFileStore) safeIssueFilename(id string) (string, error) {
 // Mirrors issueops.GenerateIssueIDInTable: with issue_id_mode=counter
 // configured, durable issues get sequential IDs (counter mode never applies
 // to wisps, matching the SQL path's issues-table-only restriction);
-// otherwise IDs are hash-based.
-func (s *FlatFileStore) generateID(ctx context.Context, prefix string, issue *types.Issue, actor string) (string, error) {
+// otherwise IDs are hash-based. planned holds IDs claimed earlier in the
+// same batch but not yet on disk — a hash candidate colliding with one is
+// skipped so the nonce advances, just as the SQL candidate SELECT runs
+// inside the transaction and sees earlier batch inserts. Pass nil outside a
+// batch.
+func (s *FlatFileStore) generateID(ctx context.Context, prefix string, issue *types.Issue, actor string, planned map[string]*types.Issue) (string, error) {
 	if !issueops.IsWisp(issue) {
 		mode, err := s.GetConfig(ctx, "issue_id_mode")
 		if err != nil {
@@ -53,6 +57,9 @@ func (s *FlatFileStore) generateID(ctx context.Context, prefix string, issue *ty
 	for length := baseLength; length <= maxLength; length++ {
 		for nonce := 0; nonce < 10; nonce++ {
 			candidate := idgen.GenerateHashID(prefix, issue.Title, issue.Description, actor, issue.CreatedAt, length, nonce)
+			if planned[candidate] != nil {
+				continue
+			}
 			path := s.issueFilename(candidate)
 			if _, err := os.Stat(path); os.IsNotExist(err) {
 				return candidate, nil
@@ -295,7 +302,7 @@ func (s *FlatFileStore) CreateIssue(ctx context.Context, issue *types.Issue, act
 		} else if issue.IDPrefix != "" {
 			prefix = prefix + "-" + issue.IDPrefix
 		}
-		id, err := s.generateID(ctx, prefix, issue, actor)
+		id, err := s.generateID(ctx, prefix, issue, actor, nil)
 		if err != nil {
 			return err
 		}
