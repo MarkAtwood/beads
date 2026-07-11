@@ -384,3 +384,60 @@ func TestRollbackDoesNotRevertConcurrentNonTxWrite(t *testing.T) {
 		t.Errorf("labels = %v, want [survivor] (committed non-tx write reverted by foreign rollback)", got.Labels)
 	}
 }
+
+// Deps arm of the same isolation rule (TASKS-eqgo): a non-transactional
+// AddDependency arriving while a foreign transaction is open must not be
+// journaled into that transaction — its edge survives the rollback, exactly
+// as a committed edge from another SQL session would.
+func TestRollbackDoesNotRevertConcurrentDepAdd(t *testing.T) {
+	s := newTestStore(t)
+	if err := s.CreateIssue(ctx, &types.Issue{ID: "dep-src", Title: "source"}, "t"); err != nil {
+		t.Fatalf("CreateIssue: %v", err)
+	}
+	if err := s.CreateIssue(ctx, &types.Issue{ID: "dep-tgt", Title: "target"}, "t"); err != nil {
+		t.Fatalf("CreateIssue: %v", err)
+	}
+
+	txStarted := make(chan struct{})
+	depDone := make(chan error, 1)
+	go func() {
+		<-txStarted
+		depDone <- s.AddDependency(ctx, &types.Dependency{
+			IssueID: "dep-src", DependsOnID: "dep-tgt", Type: types.DepBlocks,
+		}, "other-goroutine")
+	}()
+
+	sentinel := errors.New("boom")
+	err := s.RunInTransaction(ctx, "", func(tx storage.Transaction) error {
+		// Journal dep-src's pre-image (no dependencies) inside the tx, so a
+		// mis-scoped journal would restore it over the concurrent edge.
+		if err := tx.UpdateIssue(ctx, "dep-src", map[string]interface{}{"title": "in-tx"}, "t"); err != nil {
+			return err
+		}
+		close(txStarted)
+		select {
+		case err := <-depDone:
+			depDone <- err
+			t.Error("non-tx AddDependency completed inside an open transaction")
+		case <-time.After(100 * time.Millisecond):
+		}
+		return sentinel
+	})
+	if !errors.Is(err, sentinel) {
+		t.Fatalf("RunInTransaction error = %v, want sentinel", err)
+	}
+
+	if err := <-depDone; err != nil {
+		t.Fatalf("concurrent AddDependency: %v", err)
+	}
+	got, err := s.GetIssue(ctx, "dep-src")
+	if err != nil {
+		t.Fatalf("GetIssue: %v", err)
+	}
+	if got.Title != "source" {
+		t.Errorf("title = %q, want %q (tx update not rolled back)", got.Title, "source")
+	}
+	if len(got.Dependencies) != 1 || got.Dependencies[0].DependsOnID != "dep-tgt" {
+		t.Errorf("dependencies = %+v, want one edge to dep-tgt (committed non-tx AddDependency reverted by foreign rollback)", got.Dependencies)
+	}
+}
