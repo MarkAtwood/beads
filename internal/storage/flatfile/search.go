@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -628,14 +629,25 @@ func matchesMetadataFilter(issue *types.Issue, fields map[string]string, hasKey 
 }
 
 // metadataUnquote mirrors SQL JSON_UNQUOTE(JSON_EXTRACT(...)): a JSON string
-// compares by its unquoted contents, any other value by its compact JSON text
-// (so {"count": 1.0} compares as "1.0", not fmt's "1").
+// compares by its unquoted contents, any other scalar by its compact JSON
+// source text (so {"count": 1.0} compares as "1.0", not fmt's "1"), and
+// objects/arrays by MySQL's spaced serialization (see writeMySQLJSON).
 func metadataUnquote(raw json.RawMessage) string {
 	trimmed := bytes.TrimSpace(raw)
-	if len(trimmed) > 0 && trimmed[0] == '"' {
-		var s string
-		if json.Unmarshal(trimmed, &s) == nil {
-			return s
+	if len(trimmed) > 0 {
+		switch trimmed[0] {
+		case '"':
+			var s string
+			if json.Unmarshal(trimmed, &s) == nil {
+				return s
+			}
+		case '{', '[':
+			var v any
+			if json.Unmarshal(trimmed, &v) == nil {
+				var buf bytes.Buffer
+				writeMySQLJSON(&buf, v)
+				return buf.String()
+			}
 		}
 	}
 	var buf bytes.Buffer
@@ -643,6 +655,95 @@ func metadataUnquote(raw json.RawMessage) string {
 		return string(trimmed)
 	}
 	return buf.String()
+}
+
+// writeMySQLJSON renders a decoded JSON value the way MySQL/Dolt serialize
+// JSON to text (go-mysql-server sql/types/json_encode.go writeMarshalledValue
+// over an encoding/json interface{} tree): ", " and ": " separators, object
+// keys ordered by length then bytewise, and integral floats printed without a
+// fraction. It handles exactly the types encoding/json decodes into any.
+func writeMySQLJSON(buf *bytes.Buffer, v any) {
+	switch v := v.(type) {
+	case map[string]any:
+		keys := make([]string, 0, len(v))
+		for k := range v {
+			keys = append(keys, k)
+		}
+		sort.Slice(keys, func(i, j int) bool {
+			if len(keys[i]) != len(keys[j]) {
+				return len(keys[i]) < len(keys[j])
+			}
+			return keys[i] < keys[j]
+		})
+		buf.WriteByte('{')
+		for i, k := range keys {
+			if i > 0 {
+				buf.WriteString(", ")
+			}
+			writeMySQLJSONString(buf, k)
+			buf.WriteString(": ")
+			writeMySQLJSON(buf, v[k])
+		}
+		buf.WriteByte('}')
+	case []any:
+		buf.WriteByte('[')
+		for i, e := range v {
+			if i > 0 {
+				buf.WriteString(", ")
+			}
+			writeMySQLJSON(buf, e)
+		}
+		buf.WriteByte(']')
+	case string:
+		writeMySQLJSONString(buf, v)
+	case float64:
+		if v == float64(int64(v)) {
+			buf.WriteString(strconv.FormatInt(int64(v), 10))
+		} else {
+			buf.WriteString(strconv.FormatFloat(v, 'f', -1, 64))
+		}
+	case bool:
+		if v {
+			buf.WriteString("true")
+		} else {
+			buf.WriteString("false")
+		}
+	default: // nil is the only other type encoding/json decodes into any
+		buf.WriteString("null")
+	}
+}
+
+// writeMySQLJSONString writes s as a JSON string with MySQL's escaping
+// (go-mysql-server escapeSeq): named escapes for \b \t \n \f \r \" \\,
+// \u00XX for other control bytes, and — unlike encoding/json — no HTML
+// escaping of < > &.
+func writeMySQLJSONString(buf *bytes.Buffer, s string) {
+	buf.WriteByte('"')
+	for i := 0; i < len(s); i++ {
+		switch c := s[i]; c {
+		case '"':
+			buf.WriteString(`\"`)
+		case '\\':
+			buf.WriteString(`\\`)
+		case '\b':
+			buf.WriteString(`\b`)
+		case '\t':
+			buf.WriteString(`\t`)
+		case '\n':
+			buf.WriteString(`\n`)
+		case '\f':
+			buf.WriteString(`\f`)
+		case '\r':
+			buf.WriteString(`\r`)
+		default:
+			if c < 0x20 {
+				fmt.Fprintf(buf, `\u%04x`, c)
+			} else {
+				buf.WriteByte(c)
+			}
+		}
+	}
+	buf.WriteByte('"')
 }
 
 func containsCI(s, substr string) bool {
