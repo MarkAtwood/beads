@@ -331,6 +331,22 @@ func (s *FlatFileStore) CreateIssue(ctx context.Context, issue *types.Issue, act
 	s.writeMu.Lock()
 	defer s.writeMu.Unlock()
 
+	// Shared with the batch path: metadata/field validation plus
+	// timestamp/status defaults and closed_at derivation (mirrors
+	// issueops.PrepareIssueForInsert). Runs before ID generation, matching
+	// the SQL path's validate-then-generate order.
+	customStatuses, err := s.GetCustomStatuses(ctx)
+	if err != nil {
+		return fmt.Errorf("failed to get custom statuses: %w", err)
+	}
+	customTypes, err := s.GetCustomTypes(ctx)
+	if err != nil {
+		return fmt.Errorf("failed to get custom types: %w", err)
+	}
+	if err := prepareAndValidateIssue(issue, actor, customStatuses, customTypes); err != nil {
+		return err
+	}
+
 	// Generate ID if not provided.
 	if issue.ID == "" {
 		prefix, _ := s.GetConfig(ctx, "issue_prefix")
@@ -346,9 +362,6 @@ func (s *FlatFileStore) CreateIssue(ctx context.Context, issue *types.Issue, act
 			// ephemeral issues carry the -wisp ID segment that downstream
 			// ephemeral detection keys on.
 			prefix = prefix + "-wisp"
-		}
-		if issue.CreatedAt.IsZero() {
-			issue.CreatedAt = time.Now().UTC()
 		}
 		id, err := s.generateID(prefix, issue, actor)
 		if err != nil {
@@ -368,14 +381,6 @@ func (s *FlatFileStore) CreateIssue(ctx context.Context, issue *types.Issue, act
 		return fmt.Errorf("flatfile: issue %s already exists", issue.ID)
 	}
 
-	// Shared with the batch path: timestamp/status defaults and closed_at
-	// derivation (mirrors issueops.PrepareIssueForInsert).
-	prepareIssueDefaults(issue, actor)
-
-	if err := s.validateIssueForInsert(ctx, issue); err != nil {
-		return err
-	}
-
 	if err := s.writeIssue(issue); err != nil {
 		return err
 	}
@@ -393,34 +398,6 @@ func (s *FlatFileStore) CreateIssue(ctx context.Context, issue *types.Issue, act
 		if err := s.recordCommentEvent(issue.ID, issueops.IsWisp(issue), types.EventLabelAdded, actor, "Added label: "+label); err != nil {
 			return err
 		}
-	}
-	return nil
-}
-
-// validateIssueForInsert mirrors the validation half of
-// issueops.PrepareIssueForInsert: metadata schema validation plus
-// Issue.ValidateWithCustom against the configured custom statuses/types.
-// One documented divergence: the flatfile store has always admitted an empty
-// issue_type (SQL rejects it) and its stored data and callers rely on that,
-// so an empty type is checked as the default task type instead.
-func (s *FlatFileStore) validateIssueForInsert(ctx context.Context, issue *types.Issue) error {
-	if err := issueops.ValidateMetadataIfConfigured(issue.Metadata); err != nil {
-		return fmt.Errorf("metadata validation failed for issue %s: %w", issue.ID, err)
-	}
-	customStatuses, err := s.GetCustomStatuses(ctx)
-	if err != nil {
-		return fmt.Errorf("flatfile: get custom statuses for validation: %w", err)
-	}
-	customTypes, err := s.GetCustomTypes(ctx)
-	if err != nil {
-		return fmt.Errorf("flatfile: get custom types for validation: %w", err)
-	}
-	check := *issue
-	if check.IssueType == "" {
-		check.IssueType = types.TypeTask
-	}
-	if err := check.ValidateWithCustom(customStatuses, customTypes); err != nil {
-		return fmt.Errorf("validation failed for issue %s: %w", issue.ID, err)
 	}
 	return nil
 }

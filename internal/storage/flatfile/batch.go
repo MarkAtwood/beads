@@ -65,6 +65,17 @@ func (s *FlatFileStore) CreateIssuesWithFullOptions(ctx context.Context, issues 
 	configPrefix, _ := s.GetConfig(ctx, "issue_prefix")
 	allowedPrefixes, _ := s.GetConfig(ctx, "allowed_prefixes")
 
+	// Read once per batch and reused for every issue, mirroring
+	// issueops.NewBatchContext.
+	customStatuses, err := s.GetCustomStatuses(ctx)
+	if err != nil {
+		return fmt.Errorf("failed to get custom statuses: %w", err)
+	}
+	customTypes, err := s.GetCustomTypes(ctx)
+	if err != nil {
+		return fmt.Errorf("failed to get custom types: %w", err)
+	}
+
 	// planned holds the final state of every batch-written issue, keyed by ID,
 	// so later batch members see earlier ones (parents, dep targets).
 	planned := make(map[string]*types.Issue)
@@ -74,11 +85,9 @@ func (s *FlatFileStore) CreateIssuesWithFullOptions(ctx context.Context, issues 
 		if issue == nil {
 			continue
 		}
-		prepareIssueDefaults(issue, actor)
-
 		// Mirrors issueops.CreateIssueInTxWithResult: PrepareIssueForInsert
 		// validates every batch member before anything is written.
-		if err := s.validateIssueForInsert(ctx, issue); err != nil {
+		if err := prepareAndValidateIssue(issue, actor, customStatuses, customTypes); err != nil {
 			return err
 		}
 
@@ -214,6 +223,23 @@ func (s *FlatFileStore) CreateIssues(ctx context.Context, issues []*types.Issue,
 	return s.CreateIssuesWithFullOptions(ctx, issues, actor, storage.BatchCreateOptions{
 		OrphanHandling: storage.OrphanAllow,
 	})
+}
+
+// prepareAndValidateIssue mirrors issueops.PrepareIssueForInsert: metadata
+// schema validation, then normalization defaults, then full field validation
+// against custom statuses/types. IssueType additionally defaults to task via
+// types.SetDefaults — SQL callers (import, molecules) apply SetDefaults before
+// reaching storage, while flatfile's exported methods are their own boundary.
+func prepareAndValidateIssue(issue *types.Issue, actor string, customStatuses, customTypes []string) error {
+	if err := issueops.ValidateMetadataIfConfigured(issue.Metadata); err != nil {
+		return fmt.Errorf("metadata validation failed for issue %s: %w", issue.ID, err)
+	}
+	issue.SetDefaults()
+	prepareIssueDefaults(issue, actor)
+	if err := issue.ValidateWithCustom(customStatuses, customTypes); err != nil {
+		return fmt.Errorf("validation failed for issue %s: %w", issue.ID, err)
+	}
+	return nil
 }
 
 // prepareIssueDefaults mirrors the normalization half of
