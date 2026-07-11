@@ -194,9 +194,23 @@ Examples:
 			}
 		}()
 
+		// Resolve the diagnostic target first (positional arg > BEADS_DIR >
+		// cwd) so the flatfile short-circuit below diagnoses the requested
+		// workspace, not whatever the current directory happens to be.
+		checkPath := "."
+		if len(args) > 0 {
+			checkPath = args[0]
+		} else if beadsDir := os.Getenv("BEADS_DIR"); beadsDir != "" {
+			checkPath = filepath.Dir(beadsDir)
+		}
+		absPath, err := filepath.Abs(checkPath)
+		if err != nil {
+			return HandleError("failed to resolve path: %v", err)
+		}
+
 		// Flat-file backend: run flatfile doctor directly (no SQL server needed).
-		if beadsDir := doctor.ResolveBeadsDirForRepo("."); doctor.IsFlatfileBackend(beadsDir) {
-			result := runDiagnostics(".")
+		if beadsDir := doctor.ResolveBeadsDirForRepo(absPath); doctor.IsFlatfileBackend(beadsDir) {
+			result := runDiagnostics(absPath)
 			if jsonOutput {
 				if err := exportDiagnostics(result, ""); err != nil {
 					return HandleError("failed to export diagnostics: %v", err)
@@ -223,20 +237,6 @@ Examples:
 		if usesProxiedServer() {
 			fmt.Fprintln(os.Stderr, "Note: 'bd doctor' is not yet supported in proxied-server mode.")
 			return nil
-		}
-
-		var checkPath string
-		if len(args) > 0 {
-			checkPath = args[0]
-		} else if beadsDir := os.Getenv("BEADS_DIR"); beadsDir != "" {
-			checkPath = filepath.Dir(beadsDir)
-		} else {
-			checkPath = "."
-		}
-
-		absPath, err := filepath.Abs(checkPath)
-		if err != nil {
-			return HandleError("failed to resolve path: %v", err)
 		}
 
 		if doctorFix && isOrchestratorRoot(absPath) {
