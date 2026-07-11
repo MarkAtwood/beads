@@ -18,10 +18,8 @@ func validateID(id string) error {
 	if strings.ContainsAny(id, "/\\") {
 		return fmt.Errorf("flatfile: invalid issue ID %q: contains path separator", id)
 	}
-	if id == ".." || strings.HasPrefix(id, ".."+string(filepath.Separator)) || strings.HasSuffix(id, string(filepath.Separator)+"..") || strings.Contains(id, string(filepath.Separator)+".."+string(filepath.Separator)) {
-		return fmt.Errorf("flatfile: invalid issue ID %q: contains path traversal", id)
-	}
-	// Belt and suspenders: the "." prefix check catches ".." and hidden files.
+	// The "." prefix check catches ".", "..", and hidden files. Any other
+	// ".." component would need a separator, rejected above.
 	if strings.HasPrefix(id, ".") {
 		return fmt.Errorf("flatfile: invalid issue ID %q: must not start with '.'", id)
 	}
