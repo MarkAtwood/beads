@@ -551,8 +551,14 @@ func applyUpdates(issue *types.Issue, updates map[string]interface{}) {
 				issue.Description = v
 			}
 		case "status":
-			if v, ok := val.(string); ok {
+			// The SQL path binds the value generically, so both string and
+			// types.Status land in the column; mirror that here (callers like
+			// merge_slot pass types.Status).
+			switch v := val.(type) {
+			case string:
 				issue.Status = types.Status(v)
+			case types.Status:
+				issue.Status = v
 			}
 		case "priority":
 			switch v := val.(type) {
@@ -562,8 +568,11 @@ func applyUpdates(issue *types.Issue, updates map[string]interface{}) {
 				issue.Priority = int(v)
 			}
 		case "issue_type":
-			if v, ok := val.(string); ok {
+			switch v := val.(type) {
+			case string:
 				issue.IssueType = types.IssueType(v)
+			case types.IssueType:
+				issue.IssueType = v
 			}
 		case "assignee":
 			if v, ok := val.(string); ok {
@@ -636,8 +645,11 @@ func applyUpdates(issue *types.Issue, updates map[string]interface{}) {
 				issue.NoHistory = v
 			}
 		case "wisp_type":
-			if v, ok := val.(string); ok {
+			switch v := val.(type) {
+			case string:
 				issue.WispType = types.WispType(v)
+			case types.WispType:
+				issue.WispType = v
 			}
 		case "estimated_minutes":
 			switch v := val.(type) {
