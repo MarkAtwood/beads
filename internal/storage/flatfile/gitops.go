@@ -39,6 +39,23 @@ func (s *FlatFileStore) git(ctx context.Context, args ...string) (string, error)
 	return strings.TrimSpace(string(out)), nil
 }
 
+// gitErrContains reports whether err (from s.git, which embeds git's stderr)
+// matches one of the expected benign failure messages. Anything else — missing
+// git binary, corrupted repo, cancelled context — must be propagated, not
+// collapsed into an empty result.
+func gitErrContains(err error, substrs ...string) bool {
+	if err == nil {
+		return false
+	}
+	msg := err.Error()
+	for _, sub := range substrs {
+		if strings.Contains(msg, sub) {
+			return true
+		}
+	}
+	return false
+}
+
 // validateGitArg rejects strings starting with "-" to prevent git flag injection.
 func validateGitArg(name, value string) error {
 	if strings.HasPrefix(value, "-") {
@@ -133,7 +150,15 @@ func (s *FlatFileStore) CommitExists(ctx context.Context, commitHash string) (bo
 		return false, err
 	}
 	_, err := s.git(ctx, "cat-file", "-t", commitHash)
-	return err == nil, nil
+	if err != nil {
+		// Missing object is the expected "no" answer; anything else
+		// (broken repo, missing git, cancelled context) is an error.
+		if gitErrContains(err, "Not a valid object name", "could not get object info") {
+			return false, nil
+		}
+		return false, err
+	}
+	return true, nil
 }
 
 func (s *FlatFileStore) GetCurrentCommit(ctx context.Context) (string, error) {
@@ -143,7 +168,7 @@ func (s *FlatFileStore) GetCurrentCommit(ctx context.Context) (string, error) {
 func (s *FlatFileStore) Status(ctx context.Context) (*storage.Status, error) {
 	out, err := s.git(ctx, "status", "--porcelain", ".beads/")
 	if err != nil {
-		return &storage.Status{}, nil
+		return nil, err
 	}
 	var staged, unstaged []storage.StatusEntry
 	for _, line := range strings.Split(out, "\n") {
@@ -175,7 +200,10 @@ func (s *FlatFileStore) Log(ctx context.Context, limit int) ([]storage.CommitInf
 	args := []string{"log", fmt.Sprintf("-%d", limit), "--format=%H|%an|%ae|%aI|%s", "--", ".beads/"}
 	out, err := s.git(ctx, args...)
 	if err != nil {
-		return nil, nil // no commits yet
+		if gitErrContains(err, "does not have any commits yet") {
+			return nil, nil
+		}
+		return nil, err
 	}
 	if out == "" {
 		return nil, nil
@@ -212,7 +240,10 @@ func (s *FlatFileStore) Merge(ctx context.Context, branch string) ([]storage.Con
 }
 
 func (s *FlatFileStore) GetConflicts(ctx context.Context) ([]storage.Conflict, error) {
-	out, _ := s.git(ctx, "diff", "--name-only", "--diff-filter=U")
+	out, err := s.git(ctx, "diff", "--name-only", "--diff-filter=U")
+	if err != nil {
+		return nil, err
+	}
 	if out == "" {
 		return nil, nil
 	}
@@ -247,7 +278,13 @@ func (s *FlatFileStore) History(ctx context.Context, issueID string) ([]*storage
 	}
 	file := fmt.Sprintf(".beads/issues/%s.json", issueID)
 	out, err := s.git(ctx, "log", "--format=%H|%an|%aI", "--", file)
-	if err != nil || out == "" {
+	if err != nil {
+		if gitErrContains(err, "does not have any commits yet") {
+			return nil, nil
+		}
+		return nil, err
+	}
+	if out == "" {
 		return nil, nil
 	}
 
@@ -302,7 +339,10 @@ func (s *FlatFileStore) Diff(ctx context.Context, fromRef, toRef string) ([]*sto
 		return nil, err
 	}
 	out, err := s.git(ctx, "diff", "--name-status", fromRef+".."+toRef, "--", ".beads/issues/")
-	if err != nil || out == "" {
+	if err != nil {
+		return nil, err
+	}
+	if out == "" {
 		return nil, nil
 	}
 
@@ -372,7 +412,10 @@ func (s *FlatFileStore) HasRemote(ctx context.Context, name string) (bool, error
 
 func (s *FlatFileStore) ListRemotes(ctx context.Context) ([]storage.RemoteInfo, error) {
 	out, err := s.git(ctx, "remote", "-v")
-	if err != nil || out == "" {
+	if err != nil {
+		return nil, err
+	}
+	if out == "" {
 		return nil, nil
 	}
 	seen := make(map[string]bool)
@@ -517,7 +560,10 @@ func (s *FlatFileStore) SyncStatus(ctx context.Context, peer string) (*storage.S
 	}
 	out, err := s.git(ctx, "rev-list", "--left-right", "--count", "HEAD..."+peer+"/"+branch)
 	if err != nil {
-		return &storage.SyncStatus{Peer: peer}, nil
+		// Dolt parity: when the peer ref is not available locally (not yet
+		// fetched), return a partial result with the -1 "unknown" sentinel
+		// rather than a false 0/0 "in sync".
+		return &storage.SyncStatus{Peer: peer, LocalAhead: -1, LocalBehind: -1}, nil
 	}
 	parts := strings.Fields(out)
 	ahead, behind := 0, 0

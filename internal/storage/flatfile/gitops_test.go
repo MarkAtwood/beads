@@ -84,6 +84,91 @@ func makeConflictedMerge(t *testing.T, dir, branch string) {
 	}
 }
 
+// TASKS-m49g: git failures (here: not a git repository at all) must surface
+// as errors, not collapse into "empty history / clean status / no remotes".
+func TestReadPathsPropagateGitFailures(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not installed")
+	}
+	ctx := context.Background()
+	dir := t.TempDir() // deliberately NOT a git repo
+	s, err := NewFlatFileStore(filepath.Join(dir, ".beads"))
+	if err != nil {
+		t.Fatalf("NewFlatFileStore: %v", err)
+	}
+
+	if _, err := s.Log(ctx, 5); err == nil {
+		t.Error("Log in non-repo: want error, got nil")
+	}
+	if _, err := s.Status(ctx); err == nil {
+		t.Error("Status in non-repo: want error, got nil")
+	}
+	if _, err := s.History(ctx, "test-1"); err == nil {
+		t.Error("History in non-repo: want error, got nil")
+	}
+	if _, err := s.Diff(ctx, "HEAD~1", "HEAD"); err == nil {
+		t.Error("Diff in non-repo: want error, got nil")
+	}
+	if _, err := s.ListRemotes(ctx); err == nil {
+		t.Error("ListRemotes in non-repo: want error, got nil")
+	}
+	if _, err := s.GetConflicts(ctx); err == nil {
+		t.Error("GetConflicts in non-repo: want error, got nil")
+	}
+	if _, err := s.CommitExists(ctx, "deadbeef"); err == nil {
+		t.Error("CommitExists in non-repo: want error, got nil")
+	}
+}
+
+// TASKS-m49g: the one benign case — a repo with no commits yet — still reads
+// as empty history, and a missing object is a clean false, not an error.
+func TestBenignGitCasesStayQuiet(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not installed")
+	}
+	ctx := context.Background()
+	dir := t.TempDir()
+	gitRun(t, dir, "init", "-q", "-b", "main")
+	s, err := NewFlatFileStore(filepath.Join(dir, ".beads"))
+	if err != nil {
+		t.Fatalf("NewFlatFileStore: %v", err)
+	}
+
+	if commits, err := s.Log(ctx, 5); err != nil || commits != nil {
+		t.Errorf("Log on empty repo = (%v, %v), want (nil, nil)", commits, err)
+	}
+	if entries, err := s.History(ctx, "test-1"); err != nil || entries != nil {
+		t.Errorf("History on empty repo = (%v, %v), want (nil, nil)", entries, err)
+	}
+
+	s2, dir2 := newGitStore(t, "main")
+	head := gitRun(t, dir2, "rev-parse", "HEAD")
+	if ok, err := s2.CommitExists(ctx, head); err != nil || !ok {
+		t.Errorf("CommitExists(HEAD) = (%v, %v), want (true, nil)", ok, err)
+	}
+	for _, missing := range []string{"deadbeef", "0123456789012345678901234567890123456789"} {
+		if ok, err := s2.CommitExists(ctx, missing); err != nil || ok {
+			t.Errorf("CommitExists(%s) = (%v, %v), want (false, nil)", missing, ok, err)
+		}
+	}
+}
+
+// TASKS-m49g: an unfetched peer yields the Dolt-parity partial result
+// (-1/-1 "unknown"), never a false 0/0 "in sync".
+func TestSyncStatusUnfetchedPeer(t *testing.T) {
+	ctx := context.Background()
+	s, dir := newGitStore(t, "main")
+	gitRun(t, dir, "remote", "add", "peer", filepath.Join(t.TempDir(), "nowhere.git"))
+
+	st, err := s.SyncStatus(ctx, "peer")
+	if err != nil {
+		t.Fatalf("SyncStatus: %v", err)
+	}
+	if st.LocalAhead != -1 || st.LocalBehind != -1 {
+		t.Fatalf("SyncStatus ahead/behind = %d/%d, want -1/-1 sentinel", st.LocalAhead, st.LocalBehind)
+	}
+}
+
 // TASKS-rkqg: CommitPending must commit only .beads/, never sweep the user's
 // own staged files into a bd auto-commit.
 func TestCommitPendingScopedToBeads(t *testing.T) {
