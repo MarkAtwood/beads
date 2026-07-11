@@ -364,6 +364,13 @@ func (s *FlatFileStore) GetEpicsEligibleForClosure(_ context.Context) ([]*types.
 		if issue.IssueType != types.TypeEpic || issue.Status == types.StatusClosed {
 			continue
 		}
+		// issueops.GetEpicsEligibleForClosureInTx selects epics FROM issues
+		// only, so an ephemeral epic is never a candidate. Children stay
+		// unfiltered: the SQL side reads child deps and statuses from both
+		// the durable and wisp tables.
+		if issue.Ephemeral {
+			continue
+		}
 		kids := children[issue.ID]
 		if len(kids) == 0 {
 			continue

@@ -325,6 +325,34 @@ func TestGetEpicsEligibleForClosure(t *testing.T) {
 	}
 }
 
+// SQL reference: issueops.GetEpicsEligibleForClosureInTx selects candidate
+// epics `FROM issues` only — an ephemeral epic (wisps table on SQL backends)
+// is never returned, even with all children closed.
+func TestGetEpicsEligibleForClosureExcludesEphemeralEpic(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+
+	s.CreateIssue(ctx, &types.Issue{ID: "ee-1", Title: "Wisp epic", IssueType: types.TypeEpic,
+		Status: types.StatusOpen, Ephemeral: true}, "tester")
+	s.CreateIssue(ctx, &types.Issue{ID: "ee-1.1", Title: "Closed child", Status: types.StatusClosed}, "tester")
+	s.AddDependency(ctx, &types.Dependency{IssueID: "ee-1.1", DependsOnID: "ee-1", Type: types.DepParentChild}, "tester")
+	s.CreateIssue(ctx, &types.Issue{ID: "ee-2", Title: "Durable epic", IssueType: types.TypeEpic, Status: types.StatusOpen}, "tester")
+	s.CreateIssue(ctx, &types.Issue{ID: "ee-2.1", Title: "Closed child", Status: types.StatusClosed}, "tester")
+	s.AddDependency(ctx, &types.Dependency{IssueID: "ee-2.1", DependsOnID: "ee-2", Type: types.DepParentChild}, "tester")
+
+	epics, err := s.GetEpicsEligibleForClosure(ctx)
+	if err != nil {
+		t.Fatalf("GetEpicsEligibleForClosure: %v", err)
+	}
+	if len(epics) != 1 || epics[0].Epic.ID != "ee-2" {
+		ids := make([]string, len(epics))
+		for i, e := range epics {
+			ids[i] = e.Epic.ID
+		}
+		t.Errorf("epics = %v, want [ee-2] (ephemeral epic excluded)", ids)
+	}
+}
+
 func TestGetEpicsNotEligibleOpenChild(t *testing.T) {
 	s := newTestStore(t)
 	ctx := context.Background()

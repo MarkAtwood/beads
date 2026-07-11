@@ -21,8 +21,15 @@ func (s *FlatFileStore) GetStatistics(_ context.Context) (*types.Statistics, err
 	}
 
 	stats := &types.Statistics{}
+	blocked := computeBlockedSet(all)
 
 	for _, issue := range all {
+		if issue.Ephemeral {
+			// Wisps live in the wisps table on SQL backends;
+			// issueops.ScanIssueCountsInTx and the blocked COUNT(*) both scan
+			// FROM issues only, so ephemeral issues never enter the counts.
+			continue
+		}
 		stats.TotalIssues++
 
 		switch issue.Status {
@@ -43,11 +50,16 @@ func (s *FlatFileStore) GetStatistics(_ context.Context) (*types.Statistics, err
 		if issue.Pinned {
 			stats.PinnedIssues++
 		}
+
+		// BlockedIssues mirrors `SELECT COUNT(*) FROM issues WHERE is_blocked
+		// = 1 AND status NOT IN (closed, pinned)`; computeBlockedSet only ever
+		// marks active (non-closed, non-pinned) issues, and the ephemeral skip
+		// above keeps blocked wisps out, matching the issues-only scan.
+		if blocked[issue.ID] {
+			stats.BlockedIssues++
+		}
 	}
 
-	// BlockedIssues mirrors `is_blocked = 1 AND status NOT IN (closed, pinned)`;
-	// computeBlockedSet only ever marks active (non-closed, non-pinned) issues.
-	stats.BlockedIssues = len(computeBlockedSet(all))
 	stats.ReadyIssues = stats.OpenIssues - stats.BlockedIssues
 	if stats.ReadyIssues < 0 {
 		stats.ReadyIssues = 0
