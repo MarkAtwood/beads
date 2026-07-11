@@ -247,7 +247,8 @@ func (s *FlatFileStore) RemoveDependency(_ context.Context, issueID, dependsOnID
 
 // GetDependencies returns the issues that issueID depends on. Mirrors
 // issueops.GetDependenciesInTx: edges of every type are followed, and targets
-// that do not hydrate to an issue (missing, external) are dropped.
+// that do not hydrate to an issue (missing, external) are dropped. Any other
+// read failure (I/O error, corrupt JSON) fails the query, as it would in SQL.
 func (s *FlatFileStore) GetDependencies(_ context.Context, issueID string) ([]*types.Issue, error) {
 	if err := s.checkClosed(); err != nil {
 		return nil, err
@@ -260,9 +261,15 @@ func (s *FlatFileStore) GetDependencies(_ context.Context, issueID string) ([]*t
 
 	var result []*types.Issue
 	for _, dep := range issue.Dependencies {
+		if isExternalDepTarget(dep.DependsOnID) {
+			continue
+		}
 		target, err := s.readIssue(dep.DependsOnID)
 		if err != nil {
-			continue // skip missing/external
+			if errors.Is(err, storage.ErrNotFound) {
+				continue // skip missing (e.g. cross-prefix) targets
+			}
+			return nil, err
 		}
 		result = append(result, target)
 	}
@@ -306,9 +313,15 @@ func (s *FlatFileStore) GetDependenciesWithMetadata(_ context.Context, issueID s
 
 	var result []*types.IssueWithDependencyMetadata
 	for _, dep := range issue.Dependencies {
+		if isExternalDepTarget(dep.DependsOnID) {
+			continue
+		}
 		target, err := s.readIssue(dep.DependsOnID)
 		if err != nil {
-			continue
+			if errors.Is(err, storage.ErrNotFound) {
+				continue // skip missing (e.g. cross-prefix) targets
+			}
+			return nil, err
 		}
 		result = append(result, &types.IssueWithDependencyMetadata{
 			Issue:          *target,

@@ -2,6 +2,8 @@ package flatfile
 
 import (
 	"context"
+	"os"
+	"path/filepath"
 	"testing"
 
 	"github.com/steveyegge/beads/internal/types"
@@ -94,6 +96,51 @@ func TestRemoveDependencyNotFound(t *testing.T) {
 	err := s.RemoveDependency(ctx, "d-1", "nonexistent", "tester")
 	if err != nil {
 		t.Errorf("RemoveDependency missing = %v, want nil (silent no-op)", err)
+	}
+}
+
+func TestGetDependenciesSkipsOnlyMissingAndExternal(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+
+	s.CreateIssue(ctx, &types.Issue{ID: "f-1", Title: "Source"}, "tester")
+	s.CreateIssue(ctx, &types.Issue{ID: "f-2", Title: "Target"}, "tester")
+	s.CreateIssue(ctx, &types.Issue{ID: "f-9", Title: "Doomed"}, "tester")
+	s.AddDependency(ctx, &types.Dependency{IssueID: "f-1", DependsOnID: "f-2", Type: "blocks"}, "tester")
+	s.AddDependency(ctx, &types.Dependency{IssueID: "f-1", DependsOnID: "external:other-rig", Type: "related"}, "tester")
+	s.AddDependency(ctx, &types.Dependency{IssueID: "f-1", DependsOnID: "f-9", Type: "related"}, "tester")
+	if err := os.Remove(filepath.Join(s.issuesDir, "f-9.json")); err != nil {
+		t.Fatalf("remove target file: %v", err)
+	}
+
+	// f-9's file is gone, external:other-rig never hydrates. Both are silently
+	// skipped, mirroring the SQL JOIN that simply produces no row for them.
+	deps, err := s.GetDependencies(ctx, "f-1")
+	if err != nil {
+		t.Fatalf("GetDependencies: %v", err)
+	}
+	if len(deps) != 1 || deps[0].ID != "f-2" {
+		t.Fatalf("GetDependencies = %v, want [f-2]", deps)
+	}
+	depsMeta, err := s.GetDependenciesWithMetadata(ctx, "f-1")
+	if err != nil {
+		t.Fatalf("GetDependenciesWithMetadata: %v", err)
+	}
+	if len(depsMeta) != 1 || depsMeta[0].ID != "f-2" {
+		t.Fatalf("GetDependenciesWithMetadata = %v, want [f-2]", depsMeta)
+	}
+
+	// A target file that exists but cannot be decoded is a read failure, not a
+	// missing row: SQL backends fail the query, so must flatfile (previously
+	// the edge silently vanished from the result).
+	if err := os.WriteFile(filepath.Join(s.issuesDir, "f-2.json"), []byte("{not json"), 0o644); err != nil {
+		t.Fatalf("corrupt target file: %v", err)
+	}
+	if _, err := s.GetDependencies(ctx, "f-1"); err == nil {
+		t.Error("GetDependencies with corrupt target = nil error, want failure")
+	}
+	if _, err := s.GetDependenciesWithMetadata(ctx, "f-1"); err == nil {
+		t.Error("GetDependenciesWithMetadata with corrupt target = nil error, want failure")
 	}
 }
 
