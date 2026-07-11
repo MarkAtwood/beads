@@ -40,3 +40,33 @@ func TestGetStatisticsMatchesSQLReference(t *testing.T) {
 			stats.TotalIssues, stats.ClosedIssues, stats.OpenIssues)
 	}
 }
+
+// SQL reference: issueops.ScanIssueCountsInTx counts FROM issues only and the
+// GetStatisticsInTx blocked COUNT(*) is issues-only — wisps live in the wisps
+// table and are excluded entirely. Flatfile stores wisps as ephemeral issues
+// in the same directory, so GetStatistics must skip them.
+func TestGetStatisticsExcludesEphemeral(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+
+	s.CreateIssue(ctx, &types.Issue{ID: "se-open", Title: "Durable open", Status: types.StatusOpen}, "tester")
+	s.CreateIssue(ctx, &types.Issue{ID: "se-blocked", Title: "Durable blocked", Status: types.StatusOpen}, "tester")
+	s.AddDependency(ctx, &types.Dependency{IssueID: "se-blocked", DependsOnID: "se-open", Type: types.DepBlocks}, "tester")
+	s.CreateIssue(ctx, &types.Issue{ID: "se-wisp", Title: "Open wisp", Status: types.StatusOpen, Ephemeral: true}, "tester")
+	s.CreateIssue(ctx, &types.Issue{ID: "se-wisp-blocked", Title: "Blocked wisp", Status: types.StatusOpen, Ephemeral: true}, "tester")
+	s.AddDependency(ctx, &types.Dependency{IssueID: "se-wisp-blocked", DependsOnID: "se-open", Type: types.DepBlocks}, "tester")
+
+	stats, err := s.GetStatistics(ctx)
+	if err != nil {
+		t.Fatalf("GetStatistics: %v", err)
+	}
+	if stats.TotalIssues != 2 || stats.OpenIssues != 2 {
+		t.Errorf("total/open = %d/%d, want 2/2 (wisps excluded)", stats.TotalIssues, stats.OpenIssues)
+	}
+	if stats.BlockedIssues != 1 {
+		t.Errorf("BlockedIssues = %d, want 1 (blocked wisp excluded)", stats.BlockedIssues)
+	}
+	if stats.ReadyIssues != 1 {
+		t.Errorf("ReadyIssues = %d, want 1", stats.ReadyIssues)
+	}
+}
