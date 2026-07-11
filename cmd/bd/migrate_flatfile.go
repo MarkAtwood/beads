@@ -190,7 +190,10 @@ either migration can be retried, and can be removed afterwards.`,
 		}
 		newMeta, _ := json.MarshalIndent(meta, "", "  ")
 		newMeta = append(newMeta, '\n')
-		if err := os.WriteFile(metaPath, newMeta, 0o644); err != nil {
+		// atomicWriteFile (temp+rename): a plain os.WriteFile truncates in
+		// place, so a crash or a concurrent configfile.Load mid-write could
+		// observe an empty/partial metadata.json and break backend routing.
+		if err := atomicWriteFile(metaPath, newMeta); err != nil {
 			// Without the backend flip the migration did NOT complete; a
 			// warning here would print success while bd still routes to Dolt.
 			return abortMigration("failed to update metadata.json: %v", err)
@@ -357,7 +360,10 @@ func runFlatfileReverseMigration(beadsDir string, dryRun bool) error {
 		return HandleError("failed to encode metadata.json: %v", err)
 	}
 	newMeta = append(newMeta, '\n')
-	if err := os.WriteFile(metaPath, newMeta, 0o644); err != nil {
+	// atomicWriteFile (temp+rename): a plain os.WriteFile truncates in place,
+	// so a crash or a concurrent configfile.Load mid-write could observe an
+	// empty/partial metadata.json and break backend routing.
+	if err := atomicWriteFile(metaPath, newMeta); err != nil {
 		return HandleError("data imported into Dolt, but failed to update metadata.json: %v\nThe workspace still routes to flat-file; fix the cause and re-run 'bd migrate flatfile --reverse'.", err)
 	}
 
