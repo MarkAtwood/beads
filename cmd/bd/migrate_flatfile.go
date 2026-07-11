@@ -194,10 +194,8 @@ either migration can be retried, and can be removed afterwards.`,
 		if err != nil {
 			return abortMigration("failed to read config: %v", err)
 		}
-		for k, v := range allConfig {
-			if err := ffStore.SetConfig(ctx, k, v); err != nil {
-				return abortMigration("failed to migrate config %s: %v", k, err)
-			}
+		if err := copyAllConfig(ctx, ffStore, allConfig); err != nil {
+			return abortMigration("%v", err)
 		}
 		fmt.Printf("Migrated %d config entries.\n", len(allConfig))
 
@@ -243,6 +241,22 @@ either migration can be retried, and can be removed afterwards.`,
 		fmt.Printf("  rm -rf %s/dolt %s/embeddeddolt\n", beadsDir, beadsDir)
 		return nil
 	},
+}
+
+// copyAllConfig writes every source config KV entry into dst, failing on the
+// first error. Both migration directions use it: a dropped key is data loss
+// (issue_prefix drives ID generation; bd-remember memories have no other
+// copy once the source backend's files are removed), so failure must abort
+// the migration before the backend flip, never demote to a warning.
+func copyAllConfig(ctx context.Context, dst interface {
+	SetConfig(ctx context.Context, key, value string) error
+}, allConfig map[string]string) error {
+	for k, v := range allConfig {
+		if err := dst.SetConfig(ctx, k, v); err != nil {
+			return fmt.Errorf("failed to migrate config %s: %w", k, err)
+		}
+	}
+	return nil
 }
 
 // runFlatfileReverseMigration converts a flat-file workspace back to embedded
@@ -352,14 +366,16 @@ func runFlatfileReverseMigration(beadsDir string, dryRun bool) error {
 	}
 	fmt.Printf("Migrated %d/%d issues and %d comments.\n", result.Created, len(issues), commentCount)
 
-	configErrs := 0
-	for k, v := range allConfig {
-		if err := dst.SetConfig(ctx, k, v); err != nil {
-			fmt.Fprintf(os.Stderr, "Warning: failed to migrate config %s: %v\n", k, err)
-			configErrs++
-		}
+	// Config-copy failure is fatal BEFORE the metadata flip, matching the
+	// forward direction and the import-failure path above: config KV carries
+	// issue_prefix (ID generation) and bd-remember memories, and the success
+	// message advises deleting the flat-file config — demoting a failed key
+	// to a warning would make that advice destroy the only copy.
+	if err := copyAllConfig(ctx, dst, allConfig); err != nil {
+		_ = dst.Close()
+		return HandleError("%v\nThe workspace still routes to flat-file; fix the cause and re-run 'bd migrate flatfile --reverse'.", err)
 	}
-	fmt.Printf("Migrated %d config entries.\n", len(allConfig)-configErrs)
+	fmt.Printf("Migrated %d config entries.\n", len(allConfig))
 
 	if err := dst.Close(); err != nil {
 		fmt.Fprintf(os.Stderr, "Warning: failed to close Dolt store: %v\n", err)
