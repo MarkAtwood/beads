@@ -635,3 +635,51 @@ func TestCreateIssueWispIDPrefix(t *testing.T) {
 		t.Errorf("plain ID = %q, must not carry -wisp segment", plain.ID)
 	}
 }
+
+func TestUpdateIssueTypedEnumValues(t *testing.T) {
+	s := newTestStore(t)
+
+	s.CreateIssue(ctx, &types.Issue{ID: "typed-1", Title: "Typed enums"}, "tester")
+
+	// Real callers (merge_slot, mol_current) pass types.Status, not string;
+	// the SQL path binds the value generically so it persists there.
+	if err := s.UpdateIssue(ctx, "typed-1", map[string]interface{}{"status": types.StatusInProgress}, "tester"); err != nil {
+		t.Fatalf("UpdateIssue(status): %v", err)
+	}
+	got, err := s.GetIssue(ctx, "typed-1")
+	if err != nil {
+		t.Fatalf("GetIssue: %v", err)
+	}
+	if got.Status != types.StatusInProgress {
+		t.Errorf("Status = %q, want %q", got.Status, types.StatusInProgress)
+	}
+	if got.StartedAt == nil {
+		t.Error("StartedAt not stamped on typed in_progress transition")
+	}
+
+	if err := s.UpdateIssue(ctx, "typed-1", map[string]interface{}{"issue_type": types.TypeEpic}, "tester"); err != nil {
+		t.Fatalf("UpdateIssue(issue_type): %v", err)
+	}
+	if err := s.UpdateIssue(ctx, "typed-1", map[string]interface{}{"wisp_type": types.WispType("checkpoint")}, "tester"); err != nil {
+		t.Fatalf("UpdateIssue(wisp_type): %v", err)
+	}
+	got, _ = s.GetIssue(ctx, "typed-1")
+	if got.IssueType != types.TypeEpic {
+		t.Errorf("IssueType = %q, want %q", got.IssueType, types.TypeEpic)
+	}
+	if got.WispType != types.WispType("checkpoint") {
+		t.Errorf("WispType = %q, want %q", got.WispType, "checkpoint")
+	}
+
+	// Typed close must reach the closed_at auto-management too.
+	if err := s.UpdateIssue(ctx, "typed-1", map[string]interface{}{"status": types.StatusClosed}, "tester"); err != nil {
+		t.Fatalf("UpdateIssue(close): %v", err)
+	}
+	got, _ = s.GetIssue(ctx, "typed-1")
+	if got.Status != types.StatusClosed {
+		t.Errorf("Status = %q, want %q", got.Status, types.StatusClosed)
+	}
+	if got.ClosedAt == nil {
+		t.Error("ClosedAt not stamped on typed close")
+	}
+}
