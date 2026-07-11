@@ -49,6 +49,11 @@ func (s *FlatFileStore) generateID(prefix string, issue *types.Issue, actor stri
 	return "", fmt.Errorf("flatfile: failed to generate unique ID after trying lengths %d-%d", baseLength, maxLength)
 }
 
+// errCorruptIssue marks a readIssue failure as a decode problem with the
+// file's contents, as opposed to an I/O failure reading it. loadAllIssues
+// skips (with a warning) only errors carrying this sentinel.
+var errCorruptIssue = errors.New("corrupt issue file")
+
 // readIssue reads and unmarshals a single issue file.
 func (s *FlatFileStore) readIssue(id string) (*types.Issue, error) {
 	path, err := s.safeIssueFilename(id)
@@ -80,7 +85,7 @@ func (s *FlatFileStore) readIssue(id string) (*types.Issue, error) {
 				return fixed, nil
 			}
 		}
-		return nil, fmt.Errorf("flatfile: unmarshal issue %s: %w", id, err)
+		return nil, fmt.Errorf("flatfile: unmarshal issue %s: %w (%v)", id, errCorruptIssue, err)
 	}
 	return issue, nil
 }
@@ -204,8 +209,11 @@ func (s *FlatFileStore) writeIssue(issue *types.Issue) error {
 }
 
 // loadAllIssues reads and unmarshals every issue file in the issues directory.
-// Individual files that fail to parse are skipped with a warning to stderr
-// so that one corrupt file does not block the entire workspace.
+// Individual files that fail to PARSE are skipped with a warning to stderr so
+// that one corrupt file does not block the entire workspace; I/O failures
+// (EACCES, EIO, fd exhaustion) propagate — silently dropping a live issue
+// would corrupt bulk decisions like the DeleteIssues orphan guard and
+// AddDependency cycle checks.
 func (s *FlatFileStore) loadAllIssues() ([]*types.Issue, error) {
 	entries, err := os.ReadDir(s.issuesDir)
 	if err != nil {
@@ -224,8 +232,14 @@ func (s *FlatFileStore) loadAllIssues() ([]*types.Issue, error) {
 		id := strings.TrimSuffix(name, ".json")
 		issue, err := s.readIssue(id)
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "warning: skipping corrupt issue %s: %v\n", id, err)
-			continue
+			if errors.Is(err, storage.ErrNotFound) {
+				continue // deleted between ReadDir and read
+			}
+			if errors.Is(err, errCorruptIssue) {
+				fmt.Fprintf(os.Stderr, "warning: skipping corrupt issue %s: %v\n", id, err)
+				continue
+			}
+			return nil, err
 		}
 		issues = append(issues, issue)
 	}
