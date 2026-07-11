@@ -1014,6 +1014,17 @@ Non-interactive mode (--non-interactive or BD_NON_INTERACTIVE=1):
 			}
 		}
 
+		// Flat-file backend: create store directly, skip all Dolt setup.
+		// This dispatch must come BEFORE acquireEmbeddedLock (which creates
+		// .beads/embeddeddolt/.lock — a Dolt-only artifact that 'git add
+		// .beads/' would stage, misclassifying clones as Dolt workspaces)
+		// and before the shared-server block (a leftover
+		// BEADS_DOLT_SHARED_SERVER=1 must not spawn a Dolt server for a
+		// flat-file workspace).
+		if backend == configfile.BackendFlatfile {
+			return runInitFlatfile(ctx, beadsDir, prefix, quiet, skipHooks, skipAgents, stealth)
+		}
+
 		// Build config. Beads always uses dolt sql-server.
 		// AutoStart is always enabled during init — we need a server to initialize the database.
 		//
@@ -1117,11 +1128,6 @@ Non-interactive mode (--non-interactive or BD_NON_INTERACTIVE=1):
 			} else if !quiet {
 				fmt.Printf("  %s Global database %s available\n", ui.RenderPass("✓"), doltserver.GlobalDatabaseName)
 			}
-		}
-
-		// Flat-file backend: create store directly, skip all Dolt setup.
-		if backend == configfile.BackendFlatfile {
-			return runInitFlatfile(ctx, beadsDir, prefix, quiet, skipHooks, skipAgents, stealth)
 		}
 
 		store, err := newDoltStore(ctx, doltCfg)
