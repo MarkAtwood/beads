@@ -1040,6 +1040,31 @@ Non-interactive mode (--non-interactive or BD_NON_INTERACTIVE=1):
 				}
 			}
 		}
+		// Never clone-then-stamp: a Dolt bootstrap into a workspace about to
+		// be stamped backend=flatfile makes the just-cloned history
+		// unreachable — init prints "Bootstrapped from remote" while bd list
+		// shows an empty flat-file store (TASKS-nfbg). The remote-safety
+		// refusals above still ran (divergence/--from-jsonl conflicts keep
+		// their exact messages and exit codes); only the bootstrap itself is
+		// intercepted here. Defaulted backend: refuse with guidance — the
+		// remote marks this as a Dolt team workspace and silently shadowing
+		// it with an empty flat-file store loses the team's data from view.
+		// Explicit --backend=flatfile: honor the caller's choice — skip the
+		// bootstrap and proceed fresh; flat-file workspaces sync via git
+		// itself, never refs/dolt/data.
+		if syncFromRemote && backend == configfile.BackendFlatfile {
+			if backendFlag == "" {
+				fmt.Fprintf(os.Stderr, "Error: remote %q has Dolt data, which marks this as a Dolt team workspace.\n", syncURL)
+				fmt.Fprintf(os.Stderr, "The default backend is now flat-file, which cannot use a Dolt remote.\n")
+				fmt.Fprintf(os.Stderr, "  bd init --backend=dolt ...      # bootstrap from the team's Dolt remote\n")
+				fmt.Fprintf(os.Stderr, "  bd init --backend=flatfile ...  # fresh flat-file workspace, ignores the Dolt remote\n")
+				return &exitError{Code: 1}
+			}
+			if !quiet {
+				fmt.Printf("  %s Remote %s has Dolt data; --backend=flatfile skips the Dolt bootstrap (flat-file syncs via git)\n", ui.RenderWarn("!"), syncURL)
+			}
+			syncFromRemote = false
+		}
 		if syncFromRemote {
 			var err error
 			cloneCfg := initTimeCloneConfig(initServerMode, serverHost, serverPort, serverSocket, serverUser, dbName)
@@ -1069,7 +1094,8 @@ Non-interactive mode (--non-interactive or BD_NON_INTERACTIVE=1):
 		// .beads/' would stage, misclassifying clones as Dolt workspaces)
 		// and before the shared-server block (a leftover
 		// BEADS_DOLT_SHARED_SERVER=1 must not spawn a Dolt server for a
-		// flat-file workspace).
+		// flat-file workspace). The remote-bootstrap block above never
+		// clones for this backend (TASKS-nfbg).
 		if backend == configfile.BackendFlatfile {
 			return runInitFlatfile(ctx, beadsDir, prefix, quiet, skipHooks, skipAgents, stealth)
 		}
