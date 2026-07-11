@@ -180,6 +180,75 @@ func TestRunInTransactionCommitsWithMessage(t *testing.T) {
 	}
 }
 
+// A transaction rollback must never rewind counter.json past an ID a
+// concurrent non-transactional writer allocated — SQL backends never revert
+// another session's committed sequence allocation. If the restore raced (or
+// rewound past) a foreign allocation, the next allocation would reuse its ID
+// and atomicWrite would silently overwrite the existing issue file. The
+// foreign CreateIssue must block until the transaction (and its rollback)
+// completes, keep its allocation, and later allocations must not collide.
+func TestRollbackDoesNotRewindCounterPastConcurrentAllocation(t *testing.T) {
+	s := newTestStore(t)
+	if err := s.SetConfig(ctx, "issue_prefix", "test"); err != nil {
+		t.Fatalf("SetConfig(issue_prefix): %v", err)
+	}
+	if err := s.SetConfig(ctx, "issue_id_mode", "counter"); err != nil {
+		t.Fatalf("SetConfig(issue_id_mode): %v", err)
+	}
+
+	txStarted := make(chan struct{})
+	type allocation struct {
+		id  string
+		err error
+	}
+	foreign := make(chan allocation, 1)
+	go func() {
+		<-txStarted
+		issue := &types.Issue{Title: "foreign survivor"}
+		err := s.CreateIssue(ctx, issue, "other-goroutine")
+		foreign <- allocation{issue.ID, err}
+	}()
+
+	sentinel := errors.New("boom")
+	err := s.RunInTransaction(ctx, "", func(tx storage.Transaction) error {
+		// Bumps the counter and journals counter.json's pre-image.
+		if err := tx.CreateIssue(ctx, &types.Issue{Title: "tx alloc"}, "t"); err != nil {
+			return err
+		}
+		close(txStarted)
+		// Give the foreign CreateIssue time to attempt its allocation while
+		// the counter pre-image sits in the journal. Pre-isolation it could
+		// allocate here and be rewound past by the rollback restore.
+		time.Sleep(100 * time.Millisecond)
+		return sentinel
+	})
+	if !errors.Is(err, sentinel) {
+		t.Fatalf("RunInTransaction error = %v, want sentinel", err)
+	}
+
+	got := <-foreign
+	if got.err != nil {
+		t.Fatalf("concurrent CreateIssue: %v", got.err)
+	}
+
+	// A fresh allocation after the rollback must not reuse the foreign ID.
+	next := &types.Issue{Title: "post-rollback"}
+	if err := s.CreateIssue(ctx, next, "t"); err != nil {
+		t.Fatalf("CreateIssue after rollback: %v", err)
+	}
+	if next.ID == got.id {
+		t.Errorf("counter rewound past concurrent allocation: %s reallocated", next.ID)
+	}
+
+	survivor, err := s.GetIssue(ctx, got.id)
+	if err != nil {
+		t.Fatalf("GetIssue(%s) after rollback: %v", got.id, err)
+	}
+	if survivor.Title != "foreign survivor" {
+		t.Errorf("foreign issue overwritten: title = %q", survivor.Title)
+	}
+}
+
 // BEADS_DIR lets the beads directory basename differ from ".beads"
 // (cmd/bd FindBeadsDir semantics). The transaction version commit must still
 // land: a hardcoded ".beads/" pathspec matches nothing in such a repo, so
