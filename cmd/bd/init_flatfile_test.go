@@ -1,11 +1,22 @@
 package main
 
 import (
+	"errors"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
 )
+
+// runBDInDir runs the prebuilt bd binary in dir and returns combined output.
+func runBDInDir(t *testing.T, bin, dir string, args ...string) (string, error) {
+	t.Helper()
+	cmd := exec.Command(bin, args...)
+	cmd.Dir = dir
+	out, err := cmd.CombinedOutput()
+	return string(out), err
+}
 
 // resetInitFlags restores initCmd flag state so one test's flags do not leak
 // into the next Execute call (cobra flag values persist per process).
@@ -169,5 +180,123 @@ func TestInitFlatfileRejectsDoltOnlyFlags(t *testing.T) {
 				t.Errorf("error %q does not name the rejected flag %s", err, tc.flag)
 			}
 		})
+	}
+}
+
+// TASKS-abg5 (unit): metadata backend=flatfile must trip the existing-data
+// guard with the same benign "already initialized" marker the SQL arms use,
+// so --init-if-missing stays idempotent and plain re-init refuses instead of
+// re-stamping metadata.json.
+func TestCheckExistingBeadsDataAtFlatfile(t *testing.T) {
+	beadsDir := filepath.Join(t.TempDir(), ".beads")
+	if err := os.MkdirAll(filepath.Join(beadsDir, "issues"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	meta := `{"backend":"flatfile","project_id":"test-project"}` + "\n"
+	if err := os.WriteFile(filepath.Join(beadsDir, "metadata.json"), []byte(meta), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	err := checkExistingBeadsDataAt(beadsDir, "tst")
+	if err == nil {
+		t.Fatal("checkExistingBeadsDataAt on a flatfile workspace returned nil; want already-initialized refusal")
+	}
+	if !errors.Is(err, errWorkspaceAlreadyInitialized) {
+		t.Errorf("guard error %v does not match errWorkspaceAlreadyInitialized; --init-if-missing idempotency depends on it", err)
+	}
+}
+
+// TASKS-abg5 (e2e): a live flat-file workspace must survive re-init attempts.
+// (1) plain `bd init` re-run must refuse (it used to mint a new project_id and
+// rewrite the prefix), (2) `bd init --backend=dolt` must refuse (it used to
+// overwrite metadata.json and orphan every issue file), (3) --init-if-missing
+// must skip idempotently with exit 0, and (4) --reinit-local remains the
+// explicit escape hatch.
+func TestInitGuardsLiveFlatfileWorkspace(t *testing.T) {
+	bdBin := buildBDForInitTests(t)
+	dir := t.TempDir()
+
+	if out, err := runBDInDir(t, bdBin, dir, "init", "--prefix", "tst", "--quiet", "--skip-hooks", "--skip-agents"); err != nil {
+		t.Fatalf("first init failed: %v\n%s", err, out)
+	}
+	metaPath := filepath.Join(dir, ".beads", "metadata.json")
+	metaBefore, err := os.ReadFile(metaPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// (1) Plain re-run refuses and changes nothing.
+	out, err := runBDInDir(t, bdBin, dir, "init", "--prefix", "other", "--quiet", "--skip-hooks", "--skip-agents")
+	if err == nil {
+		t.Errorf("plain re-init of a flatfile workspace succeeded; want refusal\n%s", out)
+	}
+	if !strings.Contains(out, "already initialized") {
+		t.Errorf("re-init refusal does not say 'already initialized':\n%s", out)
+	}
+
+	// (2) --backend=dolt refuses and changes nothing.
+	out, err = runBDInDir(t, bdBin, dir, "init", "--backend=dolt", "--prefix", "tst", "--quiet", "--skip-hooks", "--skip-agents")
+	if err == nil {
+		t.Errorf("bd init --backend=dolt over a flatfile workspace succeeded; want refusal\n%s", out)
+	}
+	if metaAfter, _ := os.ReadFile(metaPath); string(metaAfter) != string(metaBefore) {
+		t.Errorf("metadata.json changed despite refusals:\nbefore: %s\nafter:  %s", metaBefore, metaAfter)
+	}
+
+	// (3) --init-if-missing skips idempotently.
+	out, err = runBDInDir(t, bdBin, dir, "init", "--init-if-missing", "--skip-hooks", "--skip-agents")
+	if err != nil {
+		t.Errorf("init --init-if-missing on initialized flatfile workspace failed: %v\n%s", err, out)
+	}
+	if !strings.Contains(out, "Skipping init") {
+		t.Errorf("--init-if-missing did not report the idempotent skip:\n%s", out)
+	}
+	if metaAfter, _ := os.ReadFile(metaPath); string(metaAfter) != string(metaBefore) {
+		t.Errorf("--init-if-missing rewrote metadata.json:\nbefore: %s\nafter:  %s", metaBefore, metaAfter)
+	}
+
+	// (4) --reinit-local is the explicit escape hatch (empty workspace: no
+	// confirmation needed) and re-stamps a fresh identity.
+	out, err = runBDInDir(t, bdBin, dir, "init", "--reinit-local", "--prefix", "tst", "--quiet", "--skip-hooks", "--skip-agents")
+	if err != nil {
+		t.Fatalf("init --reinit-local failed: %v\n%s", err, out)
+	}
+	metaAfter, err := os.ReadFile(metaPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(metaAfter), `"backend":"flatfile"`) {
+		t.Errorf("reinit did not keep flatfile backend: %s", metaAfter)
+	}
+	if string(metaAfter) == string(metaBefore) {
+		t.Errorf("--reinit-local did not re-initialize (metadata.json unchanged)")
+	}
+}
+
+// TASKS-abg5: the guard routes destructive flat-file re-init through
+// --reinit-local + the destroy-token confirmation; --destroy-token must
+// therefore be accepted by the flatfile flag allowlist, and a non-empty
+// workspace must refuse non-interactive reinit until the token matches.
+func TestInitFlatfileReinitDestroyToken(t *testing.T) {
+	bdBin := buildBDForInitTests(t)
+	dir := t.TempDir()
+
+	if out, err := runBDInDir(t, bdBin, dir, "init", "--backend=flatfile", "--prefix", "tst", "--quiet", "--skip-hooks", "--skip-agents"); err != nil {
+		t.Fatalf("init failed: %v\n%s", err, out)
+	}
+	if out, err := runBDInDir(t, bdBin, dir, "create", "Guard fixture issue"); err != nil {
+		t.Fatalf("bd create failed: %v\n%s", err, out)
+	}
+
+	// Without the token, non-interactive reinit of a non-empty workspace refuses.
+	out, err := runBDInDir(t, bdBin, dir, "init", "--backend=flatfile", "--reinit-local", "--non-interactive", "--prefix", "tst", "--quiet", "--skip-hooks", "--skip-agents")
+	if err == nil {
+		t.Errorf("non-interactive reinit without --destroy-token succeeded; want refusal\n%s", out)
+	}
+
+	// With the matching token, reinit proceeds.
+	out, err = runBDInDir(t, bdBin, dir, "init", "--backend=flatfile", "--reinit-local", "--non-interactive", "--destroy-token", "DESTROY-tst", "--prefix", "tst", "--quiet", "--skip-hooks", "--skip-agents")
+	if err != nil {
+		t.Fatalf("reinit with matching --destroy-token failed: %v\n%s", err, out)
 	}
 }

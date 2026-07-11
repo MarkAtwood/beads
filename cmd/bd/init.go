@@ -278,6 +278,12 @@ Non-interactive mode (--non-interactive or BD_NON_INTERACTIVE=1):
 				// runInitFlatfile honors stealth mode; the SQL connection
 				// flags below do not apply to the flat-file backend.
 				allowedFlags["stealth"] = true
+				// --destroy-token is part of the shared --reinit-local
+				// confirmation path that runs before backend dispatch; the
+				// already-initialized guard (TASKS-abg5) routes destructive
+				// flat-file re-init through it, so non-interactive callers
+				// must be able to pass the token.
+				allowedFlags["destroy-token"] = true
 			} else {
 				allowedFlags["pg-url"] = true
 				allowedFlags["pg-schema"] = true
@@ -2302,13 +2308,31 @@ func alreadyInitialized(format string, args ...any) error {
 // already exists (the benign, idempotent-skip case); any other error is
 // operational and must not be treated as success.
 // checkExistingSQLBackend returns an "already initialized" guard error when cfg
-// selects a non-Dolt SQL backend (Postgres/MySQL/SQLite), each of which is marked
-// by metadata.json alone with no local DB directory to inspect. It returns nil for
-// the Dolt backend so the caller runs the directory/server checks instead. Split
-// out of checkExistingBeadsDataAt so the added SQL-backend branches don't inflate
-// that function's complexity.
+// selects a non-Dolt backend (Postgres/MySQL/SQLite/flatfile), each of which is
+// marked by metadata.json alone with no local Dolt DB directory to inspect. It
+// returns nil for the Dolt backend so the caller runs the directory/server checks
+// instead. Split out of checkExistingBeadsDataAt so the added backend branches
+// don't inflate that function's complexity.
 func checkExistingSQLBackend(cfg *configfile.Config) error {
 	switch cfg.GetBackend() {
+	case configfile.BackendFlatfile:
+		// Without this arm, backend=flatfile fell through to the legacy
+		// redirect/beads.db checks and returned nil: a re-run `bd init`
+		// silently re-stamped metadata.json with a new project_id and
+		// prefix, `bd init --backend=dolt` overwrote a live flat-file
+		// workspace (orphaning every issue file), and --init-if-missing
+		// lost its idempotency (TASKS-abg5).
+		return alreadyInitialized(`
+%s This workspace is already initialized with the flat-file backend (.beads/issues/).
+
+To use it:
+  Just run bd commands normally (e.g., %s)
+
+If it is genuinely broken and must be re-initialized:
+  bd export > issue-export.jsonl   # Export issue records first
+  bd init --reinit-local ...
+
+Aborting.`, ui.RenderWarn("⚠"), ui.RenderAccent("bd list"))
 	case configfile.BackendPostgres:
 		return alreadyInitialized(`
 %s This workspace is already initialized with the Postgres backend (schema %q).
@@ -2353,10 +2377,10 @@ func checkExistingBeadsDataAt(beadsDir string, prefix string) error {
 	}
 
 	// metadata.json is authoritative for the configured backend, so resolve it once
-	// and dispatch. A non-Dolt SQL backend (Postgres/MySQL/SQLite) is marked by
-	// metadata alone — there is no local DB directory to inspect — so a plain
-	// `bd init` (which defaults to Dolt) must not silently repoint a live SQL
-	// workspace to a fresh embedded Dolt DB and orphan its issues. --reinit-local
+	// and dispatch. A non-Dolt backend (Postgres/MySQL/SQLite/flatfile) is marked by
+	// metadata alone — there is no local Dolt DB directory to inspect — so a plain
+	// `bd init` (or `bd init --backend=dolt`) must not silently repoint a live
+	// workspace to a fresh store and orphan its issues. --reinit-local
 	// /--force bypass this (handled by the caller). A config that fails to load falls
 	// through to the redirect/database-file checks below.
 	cfg, cfgErr := configfile.Load(beadsDir)
