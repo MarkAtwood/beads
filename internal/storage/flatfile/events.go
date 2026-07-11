@@ -69,7 +69,8 @@ func (s *FlatFileStore) recordEvent(issueID string, eventType types.EventType, a
 
 // recordCommentEvent mirrors the label/comment event INSERTs, which leave
 // old_value/new_value unwritten: NULL on durable issues (events table has no
-// DEFAULT) but empty-string on wisps (wisp_events columns DEFAULT '').
+// DEFAULT) but empty-string on wisps (wisp_events columns default to the
+// empty string).
 func (s *FlatFileStore) recordCommentEvent(issueID string, isWisp bool, eventType types.EventType, actor, comment string) error {
 	ev := &types.Event{
 		IssueID:   issueID,
