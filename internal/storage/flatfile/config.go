@@ -24,6 +24,13 @@ func (s *FlatFileStore) SetConfig(ctx context.Context, key, value string) error 
 	if err := s.checkClosed(); err != nil {
 		return err
 	}
+	if strings.HasPrefix(key, metadataKeyPrefix) {
+		// The SQL backends keep metadata in its own table, so 'bd config set
+		// metadata:x' could never clobber it; flatfile shares config_kv.json,
+		// so the prefix is reserved (see metadataKeyPrefix). Erroring loudly
+		// beats silently overwriting the repo fingerprint.
+		return fmt.Errorf("flatfile: config key %q uses the reserved %q prefix", key, metadataKeyPrefix)
+	}
 	return s.runAtomic(ctx, func() error {
 		switch key {
 		case "status.custom":
@@ -39,20 +46,41 @@ func (s *FlatFileStore) SetConfig(ctx context.Context, key, value string) error 
 	})
 }
 
-// GetConfig retrieves a value from the config store.
+// metadataKeyPrefix namespaces Get/SetMetadata entries inside config_kv.json.
+// The SQL backends store metadata in a separate table, so the config API must
+// stay blind to this prefix: GetConfig/GetAllConfig never return it,
+// SetConfig rejects it, and DeleteConfig ignores it.
+const metadataKeyPrefix = "metadata:"
+
+// GetConfig retrieves a value from the config store. Metadata-namespaced keys
+// read as absent, as on the SQL backends where the config table has no such row.
 func (s *FlatFileStore) GetConfig(_ context.Context, key string) (string, error) {
 	if err := s.checkClosed(); err != nil {
 		return "", err
 	}
+	if strings.HasPrefix(key, metadataKeyPrefix) {
+		return "", nil
+	}
 	return s.getKV(s.configKVPath, key)
 }
 
-// GetAllConfig returns all config key-value pairs.
+// GetAllConfig returns all config key-value pairs. Metadata-namespaced keys
+// are filtered out: GetAllConfigInTx selects only FROM config, so 'bd config
+// list' must not leak metadata:_project_id and friends.
 func (s *FlatFileStore) GetAllConfig(_ context.Context) (map[string]string, error) {
 	if err := s.checkClosed(); err != nil {
 		return nil, err
 	}
-	return s.readKVFile(s.configKVPath)
+	kv, err := s.readKVFile(s.configKVPath)
+	if err != nil {
+		return nil, err
+	}
+	for k := range kv {
+		if strings.HasPrefix(k, metadataKeyPrefix) {
+			delete(kv, k)
+		}
+	}
+	return kv, nil
 }
 
 // SetLocalMetadata sets a key-value in the local (non-git-tracked) metadata store.

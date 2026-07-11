@@ -143,11 +143,11 @@ func (tx *flatFileTx) CycleThroughEdges(_ context.Context, edges [][2]string) (s
 // SetMetadata / GetMetadata mirror the store methods but without the
 // checkClosed guard, matching the transaction's other read-your-writes paths.
 func (tx *flatFileTx) SetMetadata(_ context.Context, key, value string) error {
-	return tx.setKV(tx.configKVPath, "metadata:"+key, value)
+	return tx.setKV(tx.configKVPath, metadataKeyPrefix+key, value)
 }
 
 func (tx *flatFileTx) GetMetadata(_ context.Context, key string) (string, error) {
-	return tx.getKV(tx.configKVPath, "metadata:"+key)
+	return tx.getKV(tx.configKVPath, metadataKeyPrefix+key)
 }
 
 // AddComment writes a structured comment, unlike the store's AddComment which

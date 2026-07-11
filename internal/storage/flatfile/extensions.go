@@ -1526,7 +1526,7 @@ func (s *FlatFileStore) GetMetadata(_ context.Context, key string) (string, erro
 	if err := s.checkClosed(); err != nil {
 		return "", err
 	}
-	return s.getKV(s.configKVPath, "metadata:"+key)
+	return s.getKV(s.configKVPath, metadataKeyPrefix+key)
 }
 
 func (s *FlatFileStore) SetMetadata(_ context.Context, key, value string) error {
@@ -1534,12 +1534,19 @@ func (s *FlatFileStore) SetMetadata(_ context.Context, key, value string) error 
 		return err
 	}
 	defer s.txShared()()
-	return s.setKV(s.configKVPath, "metadata:"+key, value)
+	return s.setKV(s.configKVPath, metadataKeyPrefix+key, value)
 }
 
+// DeleteConfig removes a config key. Metadata-namespaced keys are a silent
+// no-op: the SQL DeleteConfig touches only the config table, where no such
+// row can exist (SetConfig rejects the reserved prefix), and deleting a
+// missing config key succeeds silently there.
 func (s *FlatFileStore) DeleteConfig(_ context.Context, key string) error {
 	if err := s.checkClosed(); err != nil {
 		return err
+	}
+	if strings.HasPrefix(key, metadataKeyPrefix) {
+		return nil
 	}
 	defer s.txShared()()
 	s.kvMu.Lock()
