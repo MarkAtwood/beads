@@ -142,6 +142,15 @@ func (s *FlatFileStore) CountIssues(ctx context.Context, query string, filter ty
 // "(unassigned)", and unlabeled issues bucket under "(no labels)" — a key
 // that is absent (not zero) when every issue is labeled.
 func (s *FlatFileStore) CountIssuesByGroup(ctx context.Context, filter types.IssueFilter, groupBy string) (map[string]int, error) {
+	// SQL contract (issueops countGroupForTablesInTx): unknown groupBy is an
+	// error, never a plausible-looking bucket — checked before any scan so an
+	// empty store errors too.
+	switch groupBy {
+	case "status", "priority", "type", "assignee", "label":
+	default:
+		return nil, fmt.Errorf("unsupported groupBy: %s", groupBy)
+	}
+
 	filter.Limit = 0
 	filter.Offset = 0
 	issues, err := s.SearchIssues(ctx, "", filter)
@@ -157,7 +166,7 @@ func (s *FlatFileStore) CountIssuesByGroup(ctx context.Context, filter types.Iss
 			key = string(issue.Status)
 		case "priority":
 			key = fmt.Sprintf("P%d", issue.Priority)
-		case "type", "issue_type":
+		case "type":
 			key = string(issue.IssueType)
 		case "assignee":
 			key = issue.Assignee
@@ -173,8 +182,6 @@ func (s *FlatFileStore) CountIssuesByGroup(ctx context.Context, filter types.Iss
 				}
 			}
 			continue
-		default:
-			key = "(unknown)"
 		}
 		counts[key]++
 	}
