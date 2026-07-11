@@ -10,10 +10,23 @@ import (
 )
 
 // runBDInDir runs the prebuilt bd binary in dir and returns combined output.
+// Workspace-pointing env vars are scrubbed so the child always operates on
+// dir, not on a workspace leaked by an earlier in-process test (executing
+// rootCmd rebinds BEADS_DIR process-wide and not every test restores it).
 func runBDInDir(t *testing.T, bin, dir string, args ...string) (string, error) {
 	t.Helper()
 	cmd := exec.Command(bin, args...)
 	cmd.Dir = dir
+	scrub := map[string]bool{
+		"BEADS_DIR": true, "BEADS_DB": true, "BD_DB": true,
+		"BEADS_DOLT_SERVER_MODE": true, "BEADS_DOLT_SHARED_SERVER": true,
+	}
+	for _, kv := range os.Environ() {
+		if name, _, ok := strings.Cut(kv, "="); ok && scrub[name] {
+			continue
+		}
+		cmd.Env = append(cmd.Env, kv)
+	}
 	out, err := cmd.CombinedOutput()
 	return string(out), err
 }
