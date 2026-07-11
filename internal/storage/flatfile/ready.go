@@ -299,7 +299,10 @@ func (s *FlatFileStore) CountReadyWork(ctx context.Context, filter types.WorkFil
 // GetBlockedIssues mirrors issueops.GetBlockedIssuesInTx: the blocked set is
 // the is_blocked projection; each blocked issue lists its direct active
 // blockers (blocks/waits-for/conditional-blocks edges), and an issue blocked
-// only by inheritance substitutes its parent as the sole blocker.
+// only by inheritance substitutes its parent as the sole blocker. Of the
+// WorkFilter fields the reference applies ONLY ParentID — Status, Type,
+// Priority, Assignee, Unassigned, label fields, ExcludeTypes, and Limit are
+// all ignored there, so flatfile ignores them too.
 func (s *FlatFileStore) GetBlockedIssues(_ context.Context, filter types.WorkFilter) ([]*types.BlockedIssue, error) {
 	if err := s.checkClosed(); err != nil {
 		return nil, err
@@ -321,7 +324,7 @@ func (s *FlatFileStore) GetBlockedIssues(_ context.Context, filter types.WorkFil
 		if !blocked[issue.ID] {
 			continue
 		}
-		if !matchesWorkFilter(issue, filter) {
+		if filter.ParentID != nil && !isBlockedScopeChild(issue, *filter.ParentID) {
 			continue
 		}
 
@@ -360,10 +363,22 @@ func (s *FlatFileStore) GetBlockedIssues(_ context.Context, filter types.WorkFil
 		return result[i].Issue.CreatedAt.After(result[j].Issue.CreatedAt)
 	})
 
-	if filter.Limit > 0 && len(result) > filter.Limit {
-		result = result[:filter.Limit]
-	}
 	return result, nil
+}
+
+// isBlockedScopeChild mirrors the GetBlockedIssuesInTx ParentID scope: direct
+// parent-child children of parentID plus any dotted-prefix ID
+// (strings.HasPrefix(id, parentID+".")).
+func isBlockedScopeChild(issue *types.Issue, parentID string) bool {
+	if strings.HasPrefix(issue.ID, parentID+".") {
+		return true
+	}
+	for _, dep := range issue.Dependencies {
+		if dep.Type == types.DepParentChild && dep.DependsOnID == parentID {
+			return true
+		}
+	}
+	return false
 }
 
 // GetEpicsEligibleForClosure returns epics where all children are closed.
@@ -457,40 +472,6 @@ func matchesBasicWorkFilter(issue *types.Issue, f types.WorkFilter) bool {
 			if labelSet[l] {
 				return false
 			}
-		}
-	}
-	return true
-}
-
-func matchesWorkFilter(issue *types.Issue, f types.WorkFilter) bool {
-	if f.Status != "" && issue.Status != f.Status {
-		return false
-	}
-	if f.Type != "" && string(issue.IssueType) != f.Type {
-		return false
-	}
-	if !matchesBasicWorkFilter(issue, f) {
-		return false
-	}
-	for _, et := range f.ExcludeTypes {
-		if issue.IssueType == et {
-			return false
-		}
-	}
-	if f.ParentID != nil {
-		// Mirrors issueops.GetBlockedIssuesInTx: direct parent-child children
-		// plus any dotted-prefix ID (strings.HasPrefix(id, parentID+".")).
-		found := strings.HasPrefix(issue.ID, *f.ParentID+".")
-		if !found {
-			for _, dep := range issue.Dependencies {
-				if dep.Type == types.DepParentChild && dep.DependsOnID == *f.ParentID {
-					found = true
-					break
-				}
-			}
-		}
-		if !found {
-			return false
 		}
 	}
 	return true

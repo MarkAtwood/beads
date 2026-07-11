@@ -292,6 +292,41 @@ func TestGetReadyWorkWithCountsMultiParentPicksMin(t *testing.T) {
 	t.Fatal("mp-child not in ready set")
 }
 
+// SQL reference: issueops.GetBlockedIssuesInTx applies ONLY filter.ParentID;
+// Status/Type/Priority/Assignee/label fields and Limit are never applied
+// (dolt and sqlkit pass the filter through unmodified). A caller setting
+// those fields must get the same full blocked set on every backend.
+func TestGetBlockedIssuesIgnoresNonParentFilters(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+
+	p1 := 1
+	s.CreateIssue(ctx, &types.Issue{ID: "bf-blk", Title: "Blocker", Status: types.StatusOpen}, "tester")
+	s.CreateIssue(ctx, &types.Issue{ID: "bf-1", Title: "Blocked P1 assigned", Status: types.StatusOpen,
+		Priority: p1, Assignee: "alice"}, "tester")
+	s.AddDependency(ctx, &types.Dependency{IssueID: "bf-1", DependsOnID: "bf-blk", Type: types.DepBlocks}, "tester")
+	s.CreateIssue(ctx, &types.Issue{ID: "bf-2", Title: "Blocked P2 unassigned", Status: types.StatusOpen,
+		Priority: 2}, "tester")
+	s.AddDependency(ctx, &types.Dependency{IssueID: "bf-2", DependsOnID: "bf-blk", Type: types.DepBlocks}, "tester")
+
+	blocked, err := s.GetBlockedIssues(ctx, types.WorkFilter{
+		Priority:   &p1,
+		Unassigned: true,
+		Labels:     []string{"nonexistent"},
+		Limit:      1,
+	})
+	if err != nil {
+		t.Fatalf("GetBlockedIssues: %v", err)
+	}
+	if len(blocked) != 2 {
+		ids := make([]string, len(blocked))
+		for i, b := range blocked {
+			ids[i] = b.ID
+		}
+		t.Errorf("blocked = %v, want both bf-1 and bf-2 (non-ParentID fields and Limit ignored)", ids)
+	}
+}
+
 func readyIDs(issues []*types.Issue) []string {
 	ids := make([]string, len(issues))
 	for i, r := range issues {
