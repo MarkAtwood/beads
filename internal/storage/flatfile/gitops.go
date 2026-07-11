@@ -475,13 +475,18 @@ func (s *FlatFileStore) Sync(ctx context.Context, peer string, _ string) (*stora
 
 	_, err = s.git(ctx, "merge", peer+"/main")
 	if err != nil {
+		// Return immediately: staging or committing here would collapse the
+		// unmerged index entries and persist conflict-markered JSON as if
+		// resolved. The caller resolves via ResolveConflicts +
+		// CommitMergeResolution (matching the Dolt Sync flow, which also
+		// stops at merge failure).
 		result.Conflicts, _ = s.GetConflicts(ctx)
 		result.Error = err
-	} else {
-		result.Merged = true
+		result.EndTime = time.Now()
+		return result, err
 	}
+	result.Merged = true
 
-	_, _ = s.git(ctx, "add", ".beads/")
 	_, pushErr := s.git(ctx, "push", peer)
 	if pushErr != nil {
 		result.PushError = pushErr
