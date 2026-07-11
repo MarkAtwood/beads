@@ -15,10 +15,14 @@ import (
 )
 
 // AddIssueComment creates a new comment file under comments/{issueID}/.
+// The existence check and the comment write run under lockWrite, so a
+// concurrent DeleteIssue cascade cannot slip between them and leave an
+// orphan comment for a deleted issue (SQL FK parity).
 func (s *FlatFileStore) AddIssueComment(_ context.Context, issueID, author, text string) (*types.Comment, error) {
 	if err := s.checkClosed(); err != nil {
 		return nil, err
 	}
+	defer s.lockWrite()()
 
 	// Verify issue exists.
 	if _, err := s.readIssue(issueID); err != nil {

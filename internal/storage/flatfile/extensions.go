@@ -1307,6 +1307,7 @@ func (s *FlatFileStore) AddComment(_ context.Context, issueID, actor, comment st
 	if err := s.checkClosed(); err != nil {
 		return err
 	}
+	defer s.lockWrite()()
 	issue, err := s.readIssue(issueID)
 	if err != nil {
 		return err
@@ -1318,6 +1319,14 @@ func (s *FlatFileStore) ImportIssueComment(_ context.Context, issueID, author, t
 	if err := s.checkClosed(); err != nil {
 		return nil, err
 	}
+	defer s.lockWrite()()
+	return s.importIssueCommentLocked(issueID, author, text, createdAt)
+}
+
+// importIssueCommentLocked is ImportIssueComment's body for callers that
+// already hold writeMu (CreateIssue's inline-comment import); writeMu is not
+// reentrant, so they must not go through the exported method.
+func (s *FlatFileStore) importIssueCommentLocked(issueID, author, text string, createdAt time.Time) (*types.Comment, error) {
 	// Mirror issueops.ImportIssueCommentInTx: reject before insert.
 	if _, err := s.readIssue(issueID); err != nil {
 		if errors.Is(err, storage.ErrNotFound) {
@@ -1350,6 +1359,14 @@ func (s *FlatFileStore) ImportComment(_ context.Context, comment *types.Comment)
 	if err := s.checkClosed(); err != nil {
 		return err
 	}
+	defer s.lockWrite()()
+	return s.importCommentLocked(comment)
+}
+
+// importCommentLocked is ImportComment's body for callers that already hold
+// writeMu (the batch write phase); writeMu is not reentrant, so they must
+// not go through the exported method.
+func (s *FlatFileStore) importCommentLocked(comment *types.Comment) error {
 	if comment.ID == "" {
 		// Seq suffix keeps same-created_at minted IDs (and filenames) distinct.
 		comment.ID = fmt.Sprintf("%d-%d", comment.CreatedAt.UnixNano(), s.commentSeq.Add(1))

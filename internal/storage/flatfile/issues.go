@@ -424,13 +424,13 @@ func (s *FlatFileStore) CreateIssue(ctx context.Context, issue *types.Issue, act
 		}
 	}
 	// Mirror issueops.PersistComments: comments carried on the created issue
-	// go to the comments store.
+	// go to the comments store. Locked variant: this span holds writeMu.
 	for _, comment := range issue.Comments {
 		createdAt := comment.CreatedAt
 		if createdAt.IsZero() {
 			createdAt = time.Now().UTC()
 		}
-		if _, err := s.ImportIssueComment(ctx, issue.ID, comment.Author, comment.Text, createdAt); err != nil {
+		if _, err := s.importIssueCommentLocked(issue.ID, comment.Author, comment.Text, createdAt); err != nil {
 			return err
 		}
 	}

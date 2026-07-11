@@ -41,10 +41,11 @@ func (s *FlatFileStore) CreateIssuesWithFullOptions(ctx context.Context, issues 
 	if len(issues) == 0 {
 		return nil
 	}
-	// The whole plan-then-write batch runs under writeMu so the validated
+	// The whole plan-then-write batch runs under lockWrite so the validated
 	// in-memory plan cannot be invalidated by a concurrent mutation. No
-	// callee below takes writeMu (ImportComment writes comment files
-	// only, and events are append-only).
+	// callee below takes writeMu — comment writes go through
+	// importCommentLocked (the exported ImportComment takes lockWrite and
+	// would self-deadlock), and events are append-only.
 	defer s.lockWrite()()
 
 	// All-wisp batches force Ephemeral (mirrors sqlkit).
@@ -234,7 +235,7 @@ func (s *FlatFileStore) CreateIssuesWithFullOptions(ctx context.Context, issues 
 				c := *comment
 				c.IssueID = plan.final.ID
 				c.CreatedAt = createdAt
-				if err := s.ImportComment(ctx, &c); err != nil {
+				if err := s.importCommentLocked(&c); err != nil {
 					return err
 				}
 				existing = append(existing, &c)
