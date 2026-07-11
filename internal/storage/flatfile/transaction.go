@@ -2,74 +2,43 @@ package flatfile
 
 import (
 	"context"
-	"time"
 
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/types"
 )
 
-// flatFileTx implements storage.Transaction by delegating to the store's methods.
-// For flat-file, each file write is already atomic (write-then-rename), so the
-// "transaction" is a logical grouping. No rollback of already-written files.
+// flatFileTx implements storage.Transaction. For flat-file, each file write is
+// already atomic (write-then-rename), so the "transaction" is a logical
+// grouping with no rollback of already-written files. The embedded
+// *FlatFileStore promotes every store method, so the transaction reuses them
+// directly; only the methods below diverge from their store namesakes.
 type flatFileTx struct {
-	s *FlatFileStore
+	*FlatFileStore
 }
+
+var _ storage.Transaction = (*flatFileTx)(nil)
 
 // RunInTransaction executes fn within a logical transaction scope.
 func (s *FlatFileStore) RunInTransaction(ctx context.Context, _ string, fn func(tx storage.Transaction) error) error {
 	if err := s.checkClosed(); err != nil {
 		return err
 	}
-	tx := &flatFileTx{s: s}
+	tx := &flatFileTx{s}
 	return fn(tx)
 }
 
-func (tx *flatFileTx) CreateIssue(ctx context.Context, issue *types.Issue, actor string) error {
-	return tx.s.CreateIssue(ctx, issue, actor)
-}
-
-func (tx *flatFileTx) CreateIssues(ctx context.Context, issues []*types.Issue, actor string) error {
-	return tx.s.CreateIssues(ctx, issues, actor)
-}
-
-func (tx *flatFileTx) UpdateIssue(ctx context.Context, id string, updates map[string]interface{}, actor string) error {
-	return tx.s.UpdateIssue(ctx, id, updates, actor)
-}
-
-func (tx *flatFileTx) CloseIssue(ctx context.Context, id string, reason string, actor string, session string) error {
-	return tx.s.CloseIssue(ctx, id, reason, actor, session)
-}
-
-func (tx *flatFileTx) DeleteIssue(ctx context.Context, id string) error {
-	return tx.s.DeleteIssue(ctx, id)
-}
-
-func (tx *flatFileTx) GetIssue(ctx context.Context, id string) (*types.Issue, error) {
-	return tx.s.GetIssue(ctx, id)
-}
-
-func (tx *flatFileTx) SearchIssues(ctx context.Context, query string, filter types.IssueFilter) ([]*types.Issue, error) {
-	return tx.s.SearchIssues(ctx, query, filter)
-}
-
-func (tx *flatFileTx) SearchIssueIDs(ctx context.Context, query string, filter types.IssueFilter) ([]string, error) {
-	return tx.s.SearchIssueIDs(ctx, query, filter)
-}
-
-func (tx *flatFileTx) AddDependency(ctx context.Context, dep *types.Dependency, actor string) error {
-	return tx.s.AddDependency(ctx, dep, actor)
-}
-
+// AddDependencyWithOptions ignores the transaction-scoped options: flat-file
+// runs the same cycle check on every insert, so there is no cheaper bulk path
+// to opt into. The store has no AddDependencyWithOptions of its own.
 func (tx *flatFileTx) AddDependencyWithOptions(ctx context.Context, dep *types.Dependency, actor string, _ storage.DependencyAddOptions) error {
-	return tx.s.AddDependency(ctx, dep, actor)
+	return tx.AddDependency(ctx, dep, actor)
 }
 
-func (tx *flatFileTx) RemoveDependency(ctx context.Context, issueID, dependsOnID string, actor string) error {
-	return tx.s.RemoveDependency(ctx, issueID, dependsOnID, actor)
-}
-
+// GetDependencyRecords reads the issue's dependencies without the store
+// method's checkClosed guard — the transaction is only handed out while the
+// store is open.
 func (tx *flatFileTx) GetDependencyRecords(_ context.Context, issueID string) ([]*types.Dependency, error) {
-	issue, err := tx.s.readIssue(issueID)
+	issue, err := tx.readIssue(issueID)
 	if err != nil {
 		return nil, err
 	}
@@ -82,7 +51,7 @@ func (tx *flatFileTx) CycleThroughEdges(_ context.Context, edges [][2]string) (s
 	}
 
 	// Build the full dependency graph from all issues on disk.
-	all, err := tx.s.loadAllIssues()
+	all, err := tx.loadAllIssues()
 	if err != nil {
 		return "", err
 	}
@@ -136,51 +105,19 @@ func findPath(adj map[string][]string, from, to string, visited map[string]bool,
 	return false
 }
 
-func (tx *flatFileTx) AddLabel(ctx context.Context, issueID, label, actor string) error {
-	return tx.s.AddLabel(ctx, issueID, label, actor)
-}
-
-func (tx *flatFileTx) RemoveLabel(ctx context.Context, issueID, label, actor string) error {
-	return tx.s.RemoveLabel(ctx, issueID, label, actor)
-}
-
-func (tx *flatFileTx) GetLabels(ctx context.Context, issueID string) ([]string, error) {
-	return tx.s.GetLabels(ctx, issueID)
-}
-
-func (tx *flatFileTx) SetConfig(ctx context.Context, key, value string) error {
-	return tx.s.SetConfig(ctx, key, value)
-}
-
-func (tx *flatFileTx) GetConfig(ctx context.Context, key string) (string, error) {
-	return tx.s.GetConfig(ctx, key)
-}
-
+// SetMetadata / GetMetadata mirror the store methods but without the
+// checkClosed guard, matching the transaction's other read-your-writes paths.
 func (tx *flatFileTx) SetMetadata(_ context.Context, key, value string) error {
-	return tx.s.setKV(tx.s.configKVPath, "metadata:"+key, value)
+	return tx.setKV(tx.configKVPath, "metadata:"+key, value)
 }
 
 func (tx *flatFileTx) GetMetadata(_ context.Context, key string) (string, error) {
-	return tx.s.getKV(tx.s.configKVPath, "metadata:"+key)
+	return tx.getKV(tx.configKVPath, "metadata:"+key)
 }
 
-func (tx *flatFileTx) SetLocalMetadata(ctx context.Context, key, value string) error {
-	return tx.s.SetLocalMetadata(ctx, key, value)
-}
-
-func (tx *flatFileTx) GetLocalMetadata(ctx context.Context, key string) (string, error) {
-	return tx.s.GetLocalMetadata(ctx, key)
-}
-
+// AddComment writes a structured comment, unlike the store's AddComment which
+// records a `commented` audit event.
 func (tx *flatFileTx) AddComment(ctx context.Context, issueID, actor, comment string) error {
-	_, err := tx.s.AddIssueComment(ctx, issueID, actor, comment)
+	_, err := tx.AddIssueComment(ctx, issueID, actor, comment)
 	return err
-}
-
-func (tx *flatFileTx) ImportIssueComment(ctx context.Context, issueID, author, text string, createdAt time.Time) (*types.Comment, error) {
-	return tx.s.ImportIssueComment(ctx, issueID, author, text, createdAt)
-}
-
-func (tx *flatFileTx) GetIssueComments(ctx context.Context, issueID string) ([]*types.Comment, error) {
-	return tx.s.GetIssueComments(ctx, issueID)
 }
