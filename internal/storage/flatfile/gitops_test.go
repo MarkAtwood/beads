@@ -205,6 +205,43 @@ func TestSyncConflictPreservesUnmergedPaths(t *testing.T) {
 	}
 }
 
+// TASKS-i39o: Sync and SyncStatus must track the current branch (Dolt uses
+// peer/s.branch), not a hardcoded "main". Repo here uses "trunk".
+func TestSyncUsesCurrentBranch(t *testing.T) {
+	ctx := context.Background()
+	s, dir := newGitStore(t, "trunk")
+	clone := newPeerClone(t, dir, "trunk")
+
+	// Peer adds an issue; local adds a different one (diverged, no conflict).
+	writeIssueFile(t, clone, "test-2", "from peer")
+	gitRun(t, clone, "add", ".beads/issues/test-2.json")
+	gitRun(t, clone, "commit", "-q", "-m", "peer adds test-2")
+	gitRun(t, clone, "push", "-q", "origin", "trunk")
+	writeIssueFile(t, dir, "test-3", "local only")
+	gitRun(t, dir, "add", ".beads/issues/test-3.json")
+	gitRun(t, dir, "commit", "-q", "-m", "local adds test-3")
+
+	gitRun(t, dir, "fetch", "-q", "peer")
+	st, err := s.SyncStatus(ctx, "peer")
+	if err != nil {
+		t.Fatalf("SyncStatus: %v", err)
+	}
+	if st.LocalAhead != 1 || st.LocalBehind != 1 {
+		t.Fatalf("SyncStatus ahead/behind = %d/%d, want 1/1 (branch trunk not compared?)", st.LocalAhead, st.LocalBehind)
+	}
+
+	res, err := s.Sync(ctx, "peer", "")
+	if err != nil {
+		t.Fatalf("Sync on branch trunk: %v", err)
+	}
+	if !res.Merged {
+		t.Fatal("Sync did not merge peer/trunk")
+	}
+	if _, err := os.Stat(filepath.Join(dir, ".beads", "issues", "test-2.json")); err != nil {
+		t.Fatalf("peer issue not merged in: %v", err)
+	}
+}
+
 // TASKS-vun8: a pathspec-limited commit is forbidden during a merge; the
 // resolution commit must be a plain commit that concludes the merge
 // (oracle: git itself — MERGE_HEAD must be gone afterwards).
