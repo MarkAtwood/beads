@@ -94,8 +94,10 @@ func newDoltStoreFromConfig(ctx context.Context, beadsDir string) (storage.DoltS
 
 // newReadOnlyStoreFromConfig creates a read-only SQL-server-backed storage backend.
 func newReadOnlyStoreFromConfig(ctx context.Context, beadsDir string) (storage.DoltStorage, error) {
+	// Flat-file backend: open without creating directories — a read-only
+	// cross-repo open must not mutate the foreign checkout (GH#3231).
 	if flatfile.IsFlatFileBackend(beadsDir) {
-		return flatfile.OpenStore(ctx, beadsDir)
+		return flatfile.OpenStoreReadOnly(ctx, beadsDir)
 	}
 	cfg, err := configfile.Load(beadsDir)
 	if err != nil {

@@ -200,9 +200,10 @@ func migrateHyphenatedDB(beadsDir string, cfg *configfile.Config, oldName, newNa
 // only — no directory renames or metadata.json writes. This prevents cross-repo
 // hydration from mutating foreign projects (GH#3231).
 func newReadOnlyStoreFromConfig(ctx context.Context, beadsDir string) (storage.DoltStorage, error) {
-	// Flat-file backend: no distinction between read-only and read-write.
+	// Flat-file backend: open without creating directories — a read-only
+	// cross-repo open must not mutate the foreign checkout (GH#3231).
 	if flatfile.IsFlatFileBackend(beadsDir) {
-		return flatfile.OpenStore(ctx, beadsDir)
+		return flatfile.OpenStoreReadOnly(ctx, beadsDir)
 	}
 	cfg, err := configfile.Load(beadsDir)
 	if err != nil {
