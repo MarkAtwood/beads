@@ -84,14 +84,48 @@ func activeStatus(st types.Status) bool {
 	return st != types.StatusClosed && st != types.StatusPinned
 }
 
+// waitsForGateBlocks mirrors issueops' waitsForGateBlockedSQL predicate: a
+// waits-for waiter is blocked while the spawner target has any active
+// (non-closed, non-pinned) parent-child child, unless the edge carries an
+// any-children gate that is already satisfied by a closed (specifically
+// closed, not pinned) child. The target itself need not exist or be active —
+// only its children matter, exactly as in the SQL (which never joins the
+// target row).
+func waitsForGateBlocks(metadata string, hasActiveChild, hasClosedChild bool) bool {
+	if !hasActiveChild {
+		return false
+	}
+	if types.ParseWaitsForGateMetadata(metadata) == types.WaitsForAnyChildren && hasClosedChild {
+		return false
+	}
+	return true
+}
+
 // computeBlockedSet mirrors the is_blocked projection maintained by
 // issueops.RecomputeIsBlockedInTx: an active issue is blocked when it has a
-// blocks/conditional-blocks edge to an existing active target, or (fixpoint)
-// a parent-child edge to a blocked parent.
+// blocks/conditional-blocks edge to an existing active target, a waits-for
+// edge whose gate is unsatisfied (see waitsForGateBlocks), or (fixpoint) a
+// parent-child edge to a blocked parent.
 func computeBlockedSet(all []*types.Issue) map[string]bool {
 	statusOf := make(map[string]types.Status, len(all))
 	for _, issue := range all {
 		statusOf[issue.ID] = issue.Status
+	}
+	// Per-spawner child status aggregates for waits-for gates.
+	hasActiveChild := make(map[string]bool)
+	hasClosedChild := make(map[string]bool)
+	for _, issue := range all {
+		for _, dep := range issue.Dependencies {
+			if dep.Type != types.DepParentChild {
+				continue
+			}
+			if activeStatus(issue.Status) {
+				hasActiveChild[dep.DependsOnID] = true
+			}
+			if issue.Status == types.StatusClosed {
+				hasClosedChild[dep.DependsOnID] = true
+			}
+		}
 	}
 	blocked := make(map[string]bool)
 	for _, issue := range all {
@@ -99,12 +133,16 @@ func computeBlockedSet(all []*types.Issue) map[string]bool {
 			continue
 		}
 		for _, dep := range issue.Dependencies {
-			if !isBlockingDepType(dep.Type) {
-				continue
-			}
-			if st, ok := statusOf[dep.DependsOnID]; ok && activeStatus(st) {
-				blocked[issue.ID] = true
-				break
+			if isBlockingDepType(dep.Type) {
+				if st, ok := statusOf[dep.DependsOnID]; ok && activeStatus(st) {
+					blocked[issue.ID] = true
+					break
+				}
+			} else if dep.Type == types.DepWaitsFor {
+				if waitsForGateBlocks(dep.Metadata, hasActiveChild[dep.DependsOnID], hasClosedChild[dep.DependsOnID]) {
+					blocked[issue.ID] = true
+					break
+				}
 			}
 		}
 	}
