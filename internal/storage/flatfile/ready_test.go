@@ -258,6 +258,40 @@ func TestGetReadyWorkWithCountsCommentReadErrorPropagates(t *testing.T) {
 	}
 }
 
+// SQL reference: sqlbuild.SearchCountsSQL's parent-child subquery projects
+// MIN(COALESCE(target)) AS parent_id, so with multiple parent-child deps the
+// lexicographically smallest parent wins deterministically.
+func TestGetReadyWorkWithCountsMultiParentPicksMin(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+
+	s.CreateIssue(ctx, &types.Issue{ID: "mp-a", Title: "Parent A", Status: types.StatusOpen}, "tester")
+	s.CreateIssue(ctx, &types.Issue{ID: "mp-b", Title: "Parent B", Status: types.StatusOpen}, "tester")
+	s.CreateIssue(ctx, &types.Issue{ID: "mp-child", Title: "Child", Status: types.StatusOpen}, "tester")
+	// Add the smaller parent first so last-dep-wins would report mp-b.
+	s.AddDependency(ctx, &types.Dependency{IssueID: "mp-child", DependsOnID: "mp-a", Type: types.DepParentChild}, "tester")
+	s.AddDependency(ctx, &types.Dependency{IssueID: "mp-child", DependsOnID: "mp-b", Type: types.DepParentChild}, "tester")
+
+	ready, err := s.GetReadyWorkWithCounts(ctx, types.WorkFilter{})
+	if err != nil {
+		t.Fatalf("GetReadyWorkWithCounts: %v", err)
+	}
+	for _, r := range ready {
+		if r.Issue.ID != "mp-child" {
+			continue
+		}
+		if r.Parent == nil || *r.Parent != "mp-a" {
+			got := "<nil>"
+			if r.Parent != nil {
+				got = *r.Parent
+			}
+			t.Errorf("Parent = %s, want mp-a (MIN of parent targets)", got)
+		}
+		return
+	}
+	t.Fatal("mp-child not in ready set")
+}
+
 func readyIDs(issues []*types.Issue) []string {
 	ids := make([]string, len(issues))
 	for i, r := range issues {
