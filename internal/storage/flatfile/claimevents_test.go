@@ -4,7 +4,9 @@ import (
 	"context"
 	"strings"
 	"testing"
+	"time"
 
+	"github.com/steveyegge/beads/internal/storage/issueops"
 	"github.com/steveyegge/beads/internal/types"
 )
 
@@ -127,5 +129,49 @@ func TestSlotSetClearRecordEvents(t *testing.T) {
 	}
 	if got := countUpdated(); got != 2 {
 		t.Errorf("updated events after no-op SlotClear = %d, want 2", got)
+	}
+}
+
+// TestReclaimExpiredLeasesRecordsEvents extends the TASKS-5nxj audit-event
+// class to the reaper path. Oracle: issueops.ReclaimExpiredLeasesInTx records
+// one lease_reclaimed event per reverted issue via RecordFullEventInTable
+// (actor passed through, old_value = the previous owner, new_value = "").
+func TestReclaimExpiredLeasesRecordsEvents(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+
+	issue := &types.Issue{ID: "bd-1", Title: "t", Status: types.StatusOpen, Priority: 1, IssueType: types.TypeTask}
+	if err := s.CreateIssue(ctx, issue, "a"); err != nil {
+		t.Fatalf("CreateIssue: %v", err)
+	}
+	if err := s.ClaimIssue(issueops.WithLeaseTTL(ctx, time.Nanosecond), "bd-1", "dead-worker"); err != nil {
+		t.Fatalf("ClaimIssue: %v", err)
+	}
+	time.Sleep(10 * time.Millisecond) // let the 1ns lease expire past the cutoff
+
+	reclaimed, err := s.ReclaimExpiredLeases(ctx, 0, "reaper")
+	if err != nil {
+		t.Fatalf("ReclaimExpiredLeases: %v", err)
+	}
+	if len(reclaimed) != 1 || reclaimed[0].ID != "bd-1" || reclaimed[0].PreviousOwner != "dead-worker" {
+		t.Fatalf("reclaimed = %+v, want [{bd-1 dead-worker}]", reclaimed)
+	}
+
+	events, err := s.GetEvents(ctx, "bd-1", 0)
+	if err != nil {
+		t.Fatalf("GetEvents: %v", err)
+	}
+	ev := findEvent(events, types.EventLeaseReclaimed)
+	if ev == nil {
+		t.Fatal("no lease_reclaimed event recorded")
+	}
+	if ev.Actor != "reaper" {
+		t.Errorf("lease_reclaimed actor = %q, want reaper", ev.Actor)
+	}
+	if ev.OldValue == nil || *ev.OldValue != "dead-worker" {
+		t.Errorf("lease_reclaimed old_value = %v, want previous owner dead-worker", ev.OldValue)
+	}
+	if ev.NewValue == nil || *ev.NewValue != "" {
+		t.Errorf("lease_reclaimed new_value = %v, want empty string", ev.NewValue)
 	}
 }
