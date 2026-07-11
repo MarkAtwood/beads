@@ -172,7 +172,18 @@ func checkFlatfileIDFilenameMatch(beadsDir string) DoctorCheck {
 }
 
 func checkFlatfileOrphans(beadsDir string) DoctorCheck {
-	issueIDs := loadIssueIDs(filepath.Join(beadsDir, "issues"))
+	issueIDs, err := loadIssueIDs(filepath.Join(beadsDir, "issues"))
+	if err != nil {
+		// Computing orphans from an empty ID set would flag every comment
+		// and event as orphaned and steer the user toward deleting all
+		// history over what is only a read failure (TASKS-awth).
+		return DoctorCheck{
+			Name:     "Orphan Data",
+			Status:   StatusWarning,
+			Message:  fmt.Sprintf("Cannot read issues directory: %v", err),
+			Category: CategoryData,
+		}
+	}
 
 	var orphans []string
 
@@ -215,7 +226,15 @@ func checkFlatfileOrphans(beadsDir string) DoctorCheck {
 
 func checkFlatfileDanglingDeps(beadsDir string) DoctorCheck {
 	issuesDir := filepath.Join(beadsDir, "issues")
-	issueIDs := loadIssueIDs(issuesDir)
+	issueIDs, err := loadIssueIDs(issuesDir)
+	if err != nil {
+		return DoctorCheck{
+			Name:     "Dependency References",
+			Status:   StatusWarning,
+			Message:  "Cannot read issues directory",
+			Category: CategoryData,
+		}
+	}
 
 	entries, err := os.ReadDir(issuesDir)
 	if err != nil {
@@ -338,17 +357,20 @@ func checkFlatfileGitTracking(beadsDir string) DoctorCheck {
 	}
 }
 
-// loadIssueIDs returns a set of issue IDs from the issues directory.
-func loadIssueIDs(issuesDir string) map[string]bool {
+// loadIssueIDs returns a set of issue IDs from the issues directory. A read
+// error is returned rather than swallowed: an empty set caused by EACCES or
+// I/O failure is indistinguishable from "no issues" and made callers report
+// every comment/event as orphaned (TASKS-awth).
+func loadIssueIDs(issuesDir string) (map[string]bool, error) {
 	ids := make(map[string]bool)
 	entries, err := os.ReadDir(issuesDir)
 	if err != nil {
-		return ids
+		return nil, err
 	}
 	for _, e := range entries {
 		if strings.HasSuffix(e.Name(), ".json") && !strings.HasSuffix(e.Name(), ".tmp") {
 			ids[strings.TrimSuffix(e.Name(), ".json")] = true
 		}
 	}
-	return ids
+	return ids, nil
 }

@@ -4,6 +4,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -58,6 +59,60 @@ func TestCheckFlatfileGitTrackingNoRepoIsNotOK(t *testing.T) {
 	check = checkFlatfileGitTracking(beadsDir)
 	if check.Status != StatusOK {
 		t.Errorf("git repo, not ignored: got status %q (%q); want %q", check.Status, check.Message, StatusOK)
+	}
+}
+
+// TASKS-awth: when the issues directory cannot be read, the orphan check must
+// report the read failure — not compute orphans from an empty ID set, which
+// flags every comment and event as orphaned and tells the user to delete them.
+func TestCheckFlatfileOrphansUnreadableIssuesDir(t *testing.T) {
+	beadsDir := filepath.Join(t.TempDir(), ".beads")
+	for _, d := range []string{"comments/TEST-1", "events"} {
+		if err := os.MkdirAll(filepath.Join(beadsDir, d), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(beadsDir, "events", "TEST-1.jsonl"), []byte("{}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	// "issues" as a regular file makes os.ReadDir fail with ENOTDIR — a read
+	// failure that is deterministic even when running as root.
+	if err := os.WriteFile(filepath.Join(beadsDir, "issues"), nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	check := checkFlatfileOrphans(beadsDir)
+	if check.Status != StatusWarning {
+		t.Errorf("unreadable issues dir: got status %q, want %q", check.Status, StatusWarning)
+	}
+	if !strings.Contains(check.Message, "Cannot read issues directory") {
+		t.Errorf("unreadable issues dir: message %q should report the read failure", check.Message)
+	}
+	if strings.Contains(check.Message, "orphaned") || check.Detail != "" || check.Fix != "" {
+		t.Errorf("unreadable issues dir must not report orphans or a destructive fix: message=%q detail=%q fix=%q",
+			check.Message, check.Detail, check.Fix)
+	}
+
+	// Same failure must also guard the dangling-deps check's ID set.
+	dep := checkFlatfileDanglingDeps(beadsDir)
+	if dep.Status != StatusWarning || !strings.Contains(dep.Message, "Cannot read issues directory") {
+		t.Errorf("dangling deps with unreadable issues dir: got status %q message %q", dep.Status, dep.Message)
+	}
+}
+
+// A readable workspace still detects genuine orphans (the fix must not
+// suppress real findings).
+func TestCheckFlatfileOrphansStillDetectsRealOrphans(t *testing.T) {
+	beadsDir := filepath.Join(t.TempDir(), ".beads")
+	for _, d := range []string{"issues", "comments/TEST-9", "events"} {
+		if err := os.MkdirAll(filepath.Join(beadsDir, d), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	check := checkFlatfileOrphans(beadsDir)
+	if check.Status != StatusWarning || !strings.Contains(check.Detail, "comments/TEST-9/") {
+		t.Errorf("real orphan: got status %q detail %q, want warning naming comments/TEST-9/", check.Status, check.Detail)
 	}
 }
 
