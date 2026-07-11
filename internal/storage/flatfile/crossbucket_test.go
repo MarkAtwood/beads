@@ -64,6 +64,58 @@ func TestBatchCrossBucketReverseDirectionErrors(t *testing.T) {
 	}
 }
 
+// SQL-reference oracle for check ORDER: CreateIssueInTxWithResult runs
+// checkCrossTableIDCollision BEFORE CheckOrphan, so a hierarchical ID whose
+// parent is missing AND whose ID is held by the sibling bucket resolves as a
+// cross-table collision, never as an orphan.
+
+func newHierarchicalWispStore(t *testing.T) *FlatFileStore {
+	t.Helper()
+	s := newTestStore(t)
+	if err := s.SetConfig(ctx, "issue_prefix", "test"); err != nil {
+		t.Fatalf("SetConfig: %v", err)
+	}
+	// Wisp holding a hierarchical ID whose parent test-1 does not exist.
+	wisp := &types.Issue{ID: "test-1.2", Title: "a wisp", Priority: 2, Ephemeral: true}
+	if err := s.CreateIssue(ctx, wisp, "tester"); err != nil {
+		t.Fatalf("CreateIssue wisp: %v", err)
+	}
+	return s
+}
+
+func TestBatchCrossBucketCollisionBeatsOrphanSkip(t *testing.T) {
+	s := newHierarchicalWispStore(t)
+	durable := &types.Issue{ID: "test-1.2", Title: "durable orphan", Priority: 2}
+	err := s.CreateIssuesWithFullOptions(ctx, []*types.Issue{durable}, "tester", storage.BatchCreateOptions{
+		OrphanHandling: storage.OrphanSkip,
+	})
+	if err == nil {
+		t.Fatal("orphan-skip swallowed a cross-bucket collision; SQL checks the collision first and aborts")
+	}
+	if !strings.Contains(err.Error(), "wisps") {
+		t.Errorf("error = %v, want mention of the wisps table", err)
+	}
+}
+
+func TestBatchCrossBucketConflictSkipBeatsOrphanStrict(t *testing.T) {
+	s := newHierarchicalWispStore(t)
+	durable := &types.Issue{ID: "test-1.2", Title: "durable orphan", Priority: 2}
+	err := s.CreateIssuesWithFullOptions(ctx, []*types.Issue{durable}, "tester", storage.BatchCreateOptions{
+		OrphanHandling: storage.OrphanStrict,
+		ConflictSkip:   true,
+	})
+	if err != nil {
+		t.Fatalf("orphan-strict fired before the cross-bucket check; SQL full-skips the collision first: %v", err)
+	}
+	got, gerr := s.GetIssue(ctx, "test-1.2")
+	if gerr != nil {
+		t.Fatalf("GetIssue: %v", gerr)
+	}
+	if !got.Ephemeral || got.Title != "a wisp" {
+		t.Errorf("stored wisp mutated under ConflictSkip: %+v", got)
+	}
+}
+
 func TestBatchCrossBucketConflictSkipIsFullSkip(t *testing.T) {
 	s := newCrossBucketStore(t)
 	durable := &types.Issue{

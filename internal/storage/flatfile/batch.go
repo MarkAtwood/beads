@@ -139,14 +139,6 @@ func (s *FlatFileStore) createIssuesBatch(ctx context.Context, issues []*types.I
 			}
 		}
 
-		// Orphan handling for hierarchical IDs (mirrors issueops.CheckOrphan).
-		if skip, err := s.checkBatchOrphan(issue, planned, opts.OrphanHandling); err != nil {
-			return err
-		} else if skip {
-			plans = append(plans, &plannedIssue{incoming: issue})
-			continue
-		}
-
 		stored, err := s.batchStoredIssue(issue.ID, planned)
 		if err != nil {
 			return err
@@ -158,6 +150,9 @@ func (s *FlatFileStore) createIssuesBatch(ctx context.Context, issues []*types.I
 		// under ConflictSkip, a FULL skip that persists no columns, labels,
 		// comments, or dependencies (SQL returns before PersistLabels/
 		// PersistComments). Upserting over it would silently flip the bucket.
+		// SQL runs this BEFORE CheckOrphan (CreateIssueInTxWithResult), so a
+		// colliding hierarchical ID with a missing parent resolves as a
+		// collision, not an orphan.
 		if stored != nil && issueops.IsWisp(stored) != issueops.IsWisp(issue) {
 			if opts.ConflictSkip {
 				plans = append(plans, &plannedIssue{incoming: issue})
@@ -168,6 +163,15 @@ func (s *FlatFileStore) createIssuesBatch(ctx context.Context, issues []*types.I
 				sibling = "issues"
 			}
 			return fmt.Errorf("cannot create %q: ID already exists in the %s table (issues and wisps share one ID space)", issue.ID, sibling)
+		}
+
+		// Orphan handling for hierarchical IDs (mirrors issueops.CheckOrphan,
+		// which SQL runs after the cross-table collision check).
+		if skip, err := s.checkBatchOrphan(issue, planned, opts.OrphanHandling); err != nil {
+			return err
+		} else if skip {
+			plans = append(plans, &plannedIssue{incoming: issue})
+			continue
 		}
 
 		plan := &plannedIssue{incoming: issue, deps: issue.Dependencies}
