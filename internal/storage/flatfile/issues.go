@@ -424,6 +424,23 @@ func (s *FlatFileStore) CreateIssue(ctx context.Context, issue *types.Issue, act
 	if err := s.writeIssue(&toWrite); err != nil {
 		return err
 	}
+	if err := s.createIssueChildrenLocked(issue, actor); err != nil {
+		// Best-effort compensation: sqlkit.CreateIssue runs in one
+		// transaction, so a failed create leaves nothing behind. Without it
+		// the orphaned issue file poisons a retry with "already exists".
+		// Inside RunInTransaction the journal restores pre-images on
+		// rollback regardless, so removing here is safe in both modes.
+		_ = s.removeIssueFile(issue.ID)
+		_ = s.removeIssueChildFiles(issue.ID)
+		return err
+	}
+	return nil
+}
+
+// createIssueChildrenLocked writes the child records of a freshly created
+// issue: the created event, per-label events, and embedded comments. Caller
+// holds writeMu.
+func (s *FlatFileStore) createIssueChildrenLocked(issue *types.Issue, actor string) error {
 	if err := s.recordEvent(issue.ID, types.EventCreated, actor, "", ""); err != nil {
 		return err
 	}

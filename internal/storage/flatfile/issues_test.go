@@ -3,6 +3,7 @@ package flatfile
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"strings"
@@ -1011,5 +1012,47 @@ func TestCreateIssueSurfacesCorruptConfigError(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "parse kv") {
 		t.Errorf("error should carry the parse failure, got: %v", err)
+	}
+}
+
+// Oracle: sqlkit.CreateIssue wraps issue+event+comment inserts in one
+// transaction (withMutationTx), so a failed create leaves nothing behind and a
+// retry succeeds. Flat-file CreateIssue must match: if recording the created
+// event fails after the issue file is written, the issue file must be cleaned
+// up so the retry does not fail with "already exists".
+func TestCreateIssueFailedEventDoesNotPoisonRetry(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("running as root; permission bits are not enforced")
+	}
+	s := newTestStore(t)
+
+	// Make the events dir unwritable so recordEvent fails after writeIssue.
+	if err := os.Chmod(s.eventsDir, 0o555); err != nil {
+		t.Fatalf("Chmod: %v", err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(s.eventsDir, 0o755) })
+
+	issue := &types.Issue{ID: "retry-1", Title: "first attempt"}
+	if err := s.CreateIssue(ctx, issue, "tester"); err == nil {
+		t.Fatal("CreateIssue should fail with unwritable events dir")
+	}
+	if _, err := s.GetIssue(ctx, "retry-1"); !errors.Is(err, storage.ErrNotFound) {
+		t.Fatalf("half-created issue left behind: GetIssue err = %v, want ErrNotFound", err)
+	}
+
+	// Restore writability; the retry must succeed, not hit "already exists".
+	if err := os.Chmod(s.eventsDir, 0o755); err != nil {
+		t.Fatalf("Chmod restore: %v", err)
+	}
+	retry := &types.Issue{ID: "retry-1", Title: "second attempt"}
+	if err := s.CreateIssue(ctx, retry, "tester"); err != nil {
+		t.Fatalf("retry CreateIssue: %v", err)
+	}
+	got, err := s.GetIssue(ctx, "retry-1")
+	if err != nil {
+		t.Fatalf("GetIssue after retry: %v", err)
+	}
+	if got.Title != "second attempt" {
+		t.Errorf("title = %q, want %q", got.Title, "second attempt")
 	}
 }
