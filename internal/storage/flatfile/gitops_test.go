@@ -217,6 +217,40 @@ func TestCommitPendingScopedToBeads(t *testing.T) {
 	}
 }
 
+// TASKS-pot8: a failed 'git add' must propagate from Commit/CommitPending.
+// The pathspec commit exits 0 with only the tracked files, so a swallowed add
+// error reports success while a new issue file is silently dropped from the
+// commit. Oracle: git — an unreadable new file makes add fail (exit 128)
+// while the pathspec commit of the tracked edit would still succeed.
+func TestCommitPropagatesAddFailure(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("running as root: chmod 000 does not deny reads")
+	}
+	ctx := context.Background()
+	s, dir := newGitStore(t, "main")
+	head := gitRun(t, dir, "rev-parse", "HEAD")
+
+	// Tracked issue modified; new issue file unreadable so 'git add' fails.
+	writeIssueFile(t, dir, "test-1", "tracked edit")
+	writeIssueFile(t, dir, "test-2", "new issue")
+	newPath := filepath.Join(dir, ".beads", "issues", "test-2.json")
+	if err := os.Chmod(newPath, 0o000); err != nil {
+		t.Fatal(err)
+	}
+	defer os.Chmod(newPath, 0o644)
+
+	if err := s.Commit(ctx, "msg"); err == nil {
+		t.Error("Commit: want add failure propagated, got nil")
+	}
+	if committed, err := s.CommitPending(ctx, ""); err == nil || committed {
+		t.Errorf("CommitPending = (%v, %v), want (false, add failure)", committed, err)
+	}
+	// No half-commit missing the new issue may have been created.
+	if got := gitRun(t, dir, "rev-parse", "HEAD"); got != head {
+		t.Fatalf("a commit was created despite add failure: %s", gitRun(t, dir, "show", "--name-only", "--format=", "HEAD"))
+	}
+}
+
 // newPeerClone creates a bare peer repo seeded from repoDir (registered there
 // as remote "peer") plus a working clone of it, and returns the clone dir.
 func newPeerClone(t *testing.T, repoDir, branch string) string {
