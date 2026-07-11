@@ -923,3 +923,26 @@ func TestUpdateIssueNilAssigneeClears(t *testing.T) {
 		t.Errorf("lease not cleared: expires=%v heartbeat=%v", got.LeaseExpiresAt, got.HeartbeatAt)
 	}
 }
+
+// Oracle: readKVFile propagates a json.Unmarshal error for a corrupt
+// config_kv.json (e.g. one carrying git merge-conflict markers). CreateIssue's
+// ID generation must surface that error, not collapse it into the misleading
+// "issue_prefix not configured" which sends the user to re-run init.
+func TestCreateIssueSurfacesCorruptConfigError(t *testing.T) {
+	s := newTestStore(t)
+
+	if err := os.WriteFile(s.configKVPath, []byte("<<<<<<< HEAD\n{}\n"), 0o644); err != nil {
+		t.Fatalf("corrupt config: %v", err)
+	}
+
+	err := s.CreateIssue(ctx, &types.Issue{Title: "needs generated id"}, "tester")
+	if err == nil {
+		t.Fatal("CreateIssue should fail on corrupt config")
+	}
+	if strings.Contains(err.Error(), "issue_prefix not configured") {
+		t.Fatalf("corrupt config masked as not-configured: %v", err)
+	}
+	if !strings.Contains(err.Error(), "parse kv") {
+		t.Errorf("error should carry the parse failure, got: %v", err)
+	}
+}

@@ -368,7 +368,13 @@ func (s *FlatFileStore) CreateIssue(ctx context.Context, issue *types.Issue, act
 
 	// Generate ID if not provided.
 	if issue.ID == "" {
-		prefix, _ := s.GetConfig(ctx, "issue_prefix")
+		prefix, err := s.GetConfig(ctx, "issue_prefix")
+		if err != nil {
+			// A corrupt or unreadable config_kv.json must not masquerade as
+			// "not configured" — that sends the user to re-init instead of
+			// fixing the file.
+			return fmt.Errorf("flatfile: read issue_prefix config: %w", err)
+		}
 		if prefix == "" {
 			return fmt.Errorf("flatfile: cannot generate ID: issue_prefix not configured")
 		}
