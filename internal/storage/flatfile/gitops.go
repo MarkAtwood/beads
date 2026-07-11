@@ -464,7 +464,17 @@ func (s *FlatFileStore) Sync(ctx context.Context, peer string, _ string) (*stora
 	start := time.Now()
 	result := &storage.SyncResult{Peer: peer, StartTime: start}
 
-	_, err := s.git(ctx, "fetch", peer)
+	// Sync against the peer's copy of the branch we are on, mirroring the
+	// Dolt backend's peer/s.branch (federation.go); hardcoding "main" broke
+	// master-default repos and merged the wrong branch into feature branches.
+	branch, err := s.CurrentBranch(ctx)
+	if err != nil {
+		result.Error = err
+		result.EndTime = time.Now()
+		return result, err
+	}
+
+	_, err = s.git(ctx, "fetch", peer)
 	if err != nil {
 		result.Error = err
 		result.EndTime = time.Now()
@@ -472,7 +482,7 @@ func (s *FlatFileStore) Sync(ctx context.Context, peer string, _ string) (*stora
 	}
 	result.Fetched = true
 
-	_, err = s.git(ctx, "merge", peer+"/main")
+	_, err = s.git(ctx, "merge", peer+"/"+branch)
 	if err != nil {
 		// Return immediately: staging or committing here would collapse the
 		// unmerged index entries and persist conflict-markered JSON as if
@@ -501,7 +511,11 @@ func (s *FlatFileStore) SyncStatus(ctx context.Context, peer string) (*storage.S
 	if err := validateGitArg("peer", peer); err != nil {
 		return nil, err
 	}
-	out, err := s.git(ctx, "rev-list", "--left-right", "--count", "HEAD..."+peer+"/main")
+	branch, err := s.CurrentBranch(ctx)
+	if err != nil {
+		return nil, err
+	}
+	out, err := s.git(ctx, "rev-list", "--left-right", "--count", "HEAD..."+peer+"/"+branch)
 	if err != nil {
 		return &storage.SyncStatus{Peer: peer}, nil
 	}
