@@ -37,6 +37,13 @@ func leaseTTL(ctx context.Context) time.Duration {
 	return DefaultLeaseTTL
 }
 
+// LeaseTTL exposes leaseTTL to backends that stamp leases outside the shared
+// SQL helpers (e.g. the flat-file store), so they resolve the per-claim TTL from
+// WithLeaseTTL identically to the Dolt/SQL path.
+func LeaseTTL(ctx context.Context) time.Duration {
+	return leaseTTL(ctx)
+}
+
 // freshRowLock returns a random non-zero int64 for the row_lock cell.
 //
 // row_lock is the keystone of dead-worker recovery on Dolt. Dolt has no real
