@@ -16,7 +16,7 @@ This project uses **Beads (bd)** for issue tracking. Use the bd CLI or MCP tools
 2. **Check ready work first** - Run ` + "`bd ready`" + ` to find unblocked issues
 3. **Always include descriptions** - Provide meaningful context when creating issues
 4. **Link discovered work** - Use ` + "`discovered-from`" + ` dependencies for issues found during work
-5. **Sync at session end** - Run ` + "`bd dolt push`" + ` before ending your session
+5. **Sync at session end** - Run ` + "`git push`" + ` before ending your session
 
 ## Quick Command Reference
 
@@ -50,7 +50,7 @@ bd dep add <issue> <depends-on> --type=related  # Soft link
 
 ### Syncing
 ` + "```bash" + `
-bd dolt push  # ALWAYS run at session end - commits and pushes changes
+git push  # ALWAYS run at session end - pushes changes including beads data
 ` + "```" + `
 
 ## Issue Types
@@ -88,7 +88,7 @@ If the MCP server is configured, you can use these tools directly:
 - ✅ Always use ` + "`--json`" + ` flag for programmatic use
 - ✅ Link discovered work with ` + "`discovered-from`" + ` dependencies
 - ✅ Check ` + "`bd ready`" + ` before asking "what should I work on?"
-- ✅ Run ` + "`bd dolt push`" + ` at end of session
+- ✅ Run ` + "`git push`" + ` at end of session
 - ❌ Do NOT create markdown TODO lists
 - ❌ Do NOT use external issue trackers
 - ❌ Do NOT duplicate tracking systems

@@ -272,7 +272,7 @@ func warnIfClaudeHooksUseRemovedSync(env claudeEnv) {
 		if !claudeSettingsUsesRemovedSyncCommand(data) {
 			continue
 		}
-		_, _ = fmt.Fprintf(env.stderr, "Warning: %s contains a hook using removed \"bd sync\". Run bd setup claude to refresh hooks (bd prime / bd dolt push), or edit settings manually.\n", p)
+		_, _ = fmt.Fprintf(env.stderr, "Warning: %s contains a hook using removed \"bd sync\". Run bd setup claude to refresh hooks, or edit settings manually.\n", p)
 	}
 }
 
