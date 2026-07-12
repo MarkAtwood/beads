@@ -194,6 +194,36 @@ Examples:
 			}
 		}()
 
+		// Resolve the diagnostic target first (positional arg > BEADS_DIR >
+		// cwd) so the flatfile short-circuit below diagnoses the requested
+		// workspace, not whatever the current directory happens to be.
+		checkPath := "."
+		if len(args) > 0 {
+			checkPath = args[0]
+		} else if beadsDir := os.Getenv("BEADS_DIR"); beadsDir != "" {
+			checkPath = filepath.Dir(beadsDir)
+		}
+		absPath, err := filepath.Abs(checkPath)
+		if err != nil {
+			return HandleError("failed to resolve path: %v", err)
+		}
+
+		// Flat-file backend: run flatfile doctor directly (no SQL server needed).
+		if beadsDir := doctor.ResolveBeadsDirForRepo(absPath); doctor.IsFlatfileBackend(beadsDir) {
+			result := runDiagnostics(absPath)
+			if jsonOutput {
+				if err := exportDiagnostics(result, ""); err != nil {
+					return HandleError("failed to export diagnostics: %v", err)
+				}
+			} else {
+				printDiagnostics(result)
+			}
+			if !result.OverallOK {
+				return fmt.Errorf("doctor checks failed")
+			}
+			return nil
+		}
+
 		if !usesSQLServer() {
 			fmt.Fprintln(os.Stderr, "Note: 'bd doctor' is not yet supported in embedded mode.")
 			fmt.Fprintln(os.Stderr, "")
@@ -207,20 +237,6 @@ Examples:
 		if usesProxiedServer() {
 			fmt.Fprintln(os.Stderr, "Note: 'bd doctor' is not yet supported in proxied-server mode.")
 			return nil
-		}
-
-		var checkPath string
-		if len(args) > 0 {
-			checkPath = args[0]
-		} else if beadsDir := os.Getenv("BEADS_DIR"); beadsDir != "" {
-			checkPath = filepath.Dir(beadsDir)
-		} else {
-			checkPath = "."
-		}
-
-		absPath, err := filepath.Abs(checkPath)
-		if err != nil {
-			return HandleError("failed to resolve path: %v", err)
 		}
 
 		if doctorFix && isOrchestratorRoot(absPath) {
@@ -412,6 +428,18 @@ func runDiagnostics(path string) doctorResult {
 	result.Checks = append(result.Checks, managedHandoffCheck)
 	if managedHandoffCheck.Status == statusWarning || managedHandoffCheck.Status == statusError {
 		result.OverallOK = false
+	}
+
+	// Flat-file backend: run flatfile-specific checks and skip Dolt checks.
+	if doctor.IsFlatfileBackend(beadsDir) {
+		for _, dc := range doctor.RunFlatfileChecks(beadsDir) {
+			check := convertDoctorCheck(dc)
+			result.Checks = append(result.Checks, check)
+			if check.Status == statusError {
+				result.OverallOK = false
+			}
+		}
+		return result
 	}
 
 	// bd-jgxi: Auto-migrate database version before checking it.
